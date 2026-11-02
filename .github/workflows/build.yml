@@ -32,19 +32,19 @@ jobs:
       - uses: microsoft/setup-msbuild@v2
 
       - name: Build LibISDB
-        run: msbuild src/LibISDB/Projects/LibISDB.sln -p:Configuration=Release -p:Platform=${{ matrix.libisdb_platform }} -m -v:m
+        run: msbuild src/LibISDB/Projects/LibISDB.sln -p:Configuration=Release -p:Platform=${{ matrix.libisdb_platform }} -p:PlatformToolset=v143 -m -v:m
 
       - name: Build TVTest
-        run: msbuild src/TVTest.sln -t:TVTest -p:Configuration=Release -p:Platform=${{ matrix.platform }} -m -v:m
+        run: msbuild src/TVTest.sln -t:TVTest -p:Configuration=Release -p:Platform=${{ matrix.platform }} -p:PlatformToolset=v143 -m -v:m
 
       - name: Build Help
         continue-on-error: true
         run: |
           choco install html-help-workshop --no-progress -y
-          msbuild src/TVTest.sln -t:Help -p:Configuration=Release -p:Platform=${{ matrix.platform }} -m -v:m
+          msbuild src/TVTest.sln -t:Help -p:Configuration=Release -p:Platform=${{ matrix.platform }} -p:PlatformToolset=v143 -m -v:m
 
       - name: Build plugins
-        run: msbuild sdk/Samples/Samples.sln -p:Configuration=Release_static -p:Platform=${{ matrix.platform }} -m -v:m
+        run: msbuild sdk/Samples/Samples.sln -p:Configuration=Release_static -p:Platform=${{ matrix.platform }} -p:PlatformToolset=v143 -m -v:m
 
       - name: Package
         shell: bash
