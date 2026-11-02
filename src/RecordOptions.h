@@ -41,6 +41,7 @@ namespace TVTest
 		bool m_fAlertLowFreeSpace = true;
 		unsigned int m_LowFreeSpaceThreshold = 2048;
 		bool m_fShowRemainTime = false;
+		bool m_fMMTSExtension = true;
 		int m_StatusBarRecordCommand;
 		CRecordingSettings m_Settings;
 
@@ -89,6 +90,8 @@ namespace TVTest
 		void SetShowRemainTime(bool fShow) { m_fShowRemainTime = fShow; }
 		bool GetShowRemainTime() const { return m_fShowRemainTime; }
 		int GetStatusBarRecordCommand() const { return m_StatusBarRecordCommand; }
+		// TLV (MMT) の録画で拡張子 .ts を .mmts にするか
+		bool IsMMTSExtensionEnabled() const { return m_fMMTSExtension; }
 	};
 
 } // namespace TVTest

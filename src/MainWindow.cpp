@@ -1320,11 +1320,17 @@ LRESULT CMainWindow::OnMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPara
 					m_Timer.BeginTimer(TIMER_ID_RESETERRORCOUNT, 2000);
 			}
 
+			const bool fServiceListEmpty =
+				pInfo->m_fMMT ? pInfo->m_MMTServiceList.empty() : pInfo->m_ServiceList.empty();
+
 			if (!m_App.Core.IsChannelScanning()
-					&& !pInfo->m_ServiceList.empty() && pInfo->m_CurService >= 0) {
+					&& !fServiceListEmpty && pInfo->m_CurService >= 0) {
 				const CChannelInfo *pChInfo = m_App.ChannelManager.GetCurrentChannelInfo();
 				const WORD TransportStreamID = pInfo->m_TransportStreamID;
-				const WORD ServiceID = pInfo->m_ServiceList[pInfo->m_CurService].ServiceID;
+				const WORD ServiceID =
+					pInfo->m_fMMT ?
+						pInfo->m_MMTServiceList[pInfo->m_CurService].ServiceID :
+						pInfo->m_ServiceList[pInfo->m_CurService].ServiceID;
 
 				if (/*pInfo->m_fStreamChanged
 						&& */TransportStreamID != 0 && ServiceID != 0
@@ -2998,10 +3004,21 @@ void CMainWindow::OnTimer(HWND hwnd, UINT id)
 		// エラーカウントをリセットする
 		// (既にサービスの情報が取得されている場合のみ)
 		{
-			const LibISDB::AnalyzerFilter *pAnalyzer =
-				m_App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+			int ServiceCount = 0;
 
-			if (pAnalyzer != nullptr && pAnalyzer->GetServiceCount() > 0) {
+			if (m_App.CoreEngine.IsMMTStream()) {
+				const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer =
+					m_App.CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+				if (pMMTAnalyzer != nullptr)
+					ServiceCount = pMMTAnalyzer->GetServiceCount();
+			} else {
+				const LibISDB::AnalyzerFilter *pAnalyzer =
+					m_App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+				if (pAnalyzer != nullptr)
+					ServiceCount = pAnalyzer->GetServiceCount();
+			}
+
+			if (ServiceCount > 0) {
 				SendCommand(CM_RESETERRORCOUNT);
 				m_Timer.EndTimer(TIMER_ID_RESETERRORCOUNT);
 			}
@@ -3127,30 +3144,39 @@ bool CMainWindow::OnInitMenuPopup(HMENU hmenu)
 		CAppCore::StreamIDInfo StreamID;
 
 		if (m_App.Core.GetCurrentStreamIDInfo(&StreamID)) {
-			LibISDB::AnalyzerFilter::ServiceList ServiceList;
 			CChannelList ChList;
 			int CurService = -1;
 
-			m_App.CoreEngine.GetSelectableServiceList(&ServiceList);
-
-			for (int i = 0; i < static_cast<int>(ServiceList.size()); i++) {
-				const LibISDB::AnalyzerFilter::ServiceInfo &ServiceInfo = ServiceList[i];
+			const auto AddService = [&](WORD ServiceID, const LibISDB::String &ServiceName) {
+				const int i = ChList.NumChannels();
 				CChannelInfo *pChInfo = new CChannelInfo;
 
 				pChInfo->SetChannelNo(i + 1);
-				if (!ServiceInfo.ServiceName.empty()) {
-					pChInfo->SetName(ServiceInfo.ServiceName.c_str());
+				if (!ServiceName.empty()) {
+					pChInfo->SetName(ServiceName.c_str());
 				} else {
 					TCHAR szName[32];
 					StringFormat(szName, TEXT("サービス{}"), i + 1);
 					pChInfo->SetName(szName);
 				}
-				pChInfo->SetServiceID(ServiceInfo.ServiceID);
+				pChInfo->SetServiceID(ServiceID);
 				pChInfo->SetNetworkID(StreamID.NetworkID);
 				pChInfo->SetTransportStreamID(StreamID.TransportStreamID);
 				ChList.AddChannel(pChInfo);
-				if (ServiceInfo.ServiceID == StreamID.ServiceID)
+				if (ServiceID == StreamID.ServiceID)
 					CurService = i;
+			};
+
+			if (m_App.CoreEngine.IsMMTStream()) {
+				LibISDB::MMTAnalyzerFilter::ServiceList ServiceList;
+				m_App.CoreEngine.GetSelectableMMTServiceList(&ServiceList);
+				for (const LibISDB::MMTAnalyzerFilter::ServiceInfo &ServiceInfo : ServiceList)
+					AddService(ServiceInfo.ServiceID, ServiceInfo.ServiceName);
+			} else {
+				LibISDB::AnalyzerFilter::ServiceList ServiceList;
+				m_App.CoreEngine.GetSelectableServiceList(&ServiceList);
+				for (const LibISDB::AnalyzerFilter::ServiceInfo &ServiceInfo : ServiceList)
+					AddService(ServiceInfo.ServiceID, ServiceInfo.ServiceName);
 			}
 
 			m_App.ChannelMenu.Create(
@@ -3208,10 +3234,13 @@ bool CMainWindow::OnInitMenuPopup(HMENU hmenu)
 				};
 
 			const int ServiceIndex = m_App.CoreEngine.GetServiceIndex();
+			const bool fMMT = m_App.CoreEngine.IsMMTStream();
 			LibISDB::AnalyzerFilter::EventComponentGroupList GroupList;
 			int Sel = -1;
 
-			if (pAnalyzer->GetEventComponentGroupList(ServiceIndex, &GroupList)
+			// MMT のマルチビュー (MH-コンポーネントグループ記述子) は未対応
+			if (!fMMT
+					&& pAnalyzer->GetEventComponentGroupList(ServiceIndex, &GroupList)
 					&& !GroupList.empty()) {
 				// マルチビューTV
 				const int NumGroup = static_cast<int>(GroupList.size());
@@ -3298,7 +3327,19 @@ bool CMainWindow::OnInitMenuPopup(HMENU hmenu)
 					szText, TEXT("{}{}: "),
 					i < 9 ? TEXT("&") : TEXT(""), i + 1);
 				GetAudioInfoText(AudioInfo, StreamNumber, szText + Length, static_cast<int>(lengthof(szText) - Length));
-				Menu.Append(CM_AUDIO_FIRST + i, szText);
+				UINT Flags = MF_ENABLED;
+				if (fMMT) {
+					// 再生できない音声 (MPEG-4 ALS など) は選択できないようにする
+					const BYTE ComponentTag = CAudioManager::IDToComponentTag(AudioInfo.ID);
+					const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer = m_App.CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+					const int StreamIndex =
+						ComponentTag != LibISDB::COMPONENT_TAG_INVALID ?
+							(pMMTAnalyzer != nullptr ? pMMTAnalyzer->GetAudioAssetIndexByComponentTag(ServiceIndex, ComponentTag) : -1) :
+							CAudioManager::IDToStreamIndex(AudioInfo.ID);
+					if (StreamIndex >= 0 && !m_App.CoreEngine.IsAudioStreamPlayable(StreamIndex))
+						Flags = MF_GRAYED;
+				}
+				Menu.Append(CM_AUDIO_FIRST + i, szText, Flags);
 
 				if (AudioInfo.ID == CurAudioID) {
 					if (AudioInfo.IsDualMono()) {
@@ -3391,7 +3432,31 @@ bool CMainWindow::OnInitMenuPopup(HMENU hmenu)
 		const int ServiceIndex = m_App.CoreEngine.GetServiceIndex();
 		LibISDB::AnalyzerFilter::EventComponentGroupList GroupList;
 
-		if (pAnalyzer->GetEventComponentGroupList(ServiceIndex, &GroupList)
+		if (m_App.CoreEngine.IsMMTStream()) {
+			// 映像アセットの一覧 (MMT のマルチビューは未対応)
+			const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer = m_App.CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+			const int AssetCount =
+				std::min(
+					pMMTAnalyzer != nullptr ? pMMTAnalyzer->GetVideoAssetCount(ServiceIndex) : 0,
+					CM_VIDEOSTREAM_LAST - CM_VIDEOSTREAM_FIRST + 1);
+
+			if (AssetCount > 0) {
+				for (int i = 0; i < AssetCount; i++) {
+					TCHAR szText[64];
+					StringFormat(
+						szText, TEXT("{}{}: 映像{}"),
+						i < 9 ? TEXT("&") : TEXT(""), i + 1, i + 1);
+					Menu.Append(CM_VIDEOSTREAM_FIRST + i, szText);
+				}
+
+				Menu.CheckRadioItem(
+					CM_VIDEOSTREAM_FIRST,
+					CM_VIDEOSTREAM_FIRST + AssetCount - 1,
+					CM_VIDEOSTREAM_FIRST + m_App.CoreEngine.GetVideoStream());
+			} else {
+				Menu.Append(0U, TEXT("映像なし"), MF_GRAYED);
+			}
+		} else if (pAnalyzer->GetEventComponentGroupList(ServiceIndex, &GroupList)
 				&& !GroupList.empty()) {
 			// マルチビューTV
 			const int NumGroup = static_cast<int>(GroupList.size());
@@ -4370,9 +4435,13 @@ bool CMainWindow::EnableViewer(bool fEnable)
 			fInit = true;
 		} else {
 			const BYTE VideoStreamType = m_App.CoreEngine.GetVideoStreamType();
+			const LibISDB::StreamFormat StreamFormat = m_App.CoreEngine.GetStreamFormat();
+			// TS と TLV ではビューアのグラフが異なるので、stream_type が同じでも構築し直す
 			fInit =
 				VideoStreamType != LibISDB::STREAM_TYPE_UNINITIALIZED &&
-				VideoStreamType != pViewer->GetVideoStreamType();
+				(VideoStreamType != pViewer->GetVideoStreamType()
+					|| (StreamFormat != LibISDB::StreamFormat::Unknown
+						&& StreamFormat != pViewer->GetStreamFormat()));
 		}
 
 		if (fInit) {

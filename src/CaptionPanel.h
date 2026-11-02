@@ -148,6 +148,10 @@ namespace TVTest
 		MutexLock m_Lock;
 		CCaptionDRCSMap m_DRCSMap;
 		CharEncoding m_SaveCharEncoding = CharEncoding::UTF16;
+		// 最後に表示した TTML 字幕の MPU (同じ MPU の再送を除くため)
+		bool m_fLastTTMLValid = false;
+		WORD m_LastTTMLPacketID = 0;
+		DWORD m_LastTTMLMPUSequenceNumber = 0;
 
 	// LibISDB::CaptionFilter::Handler
 		virtual void OnLanguageUpdate(LibISDB::CaptionFilter *pFilter, LibISDB::CaptionParser *pParser) override;
@@ -155,6 +159,8 @@ namespace TVTest
 			LibISDB::CaptionFilter *pFilter, LibISDB::CaptionParser *pParser,
 			uint8_t Language, const LibISDB::CharType *pText,
 			const LibISDB::ARIBStringDecoder::FormatList *pFormatList) override;
+		virtual void OnTTMLCaption(
+			LibISDB::CaptionFilter *pFilter, const LibISDB::CaptionFilter::TTMLCaptionInfo &Info) override;
 
 		void ClearCaptionList();
 		void AppendText(LPCTSTR pszText);

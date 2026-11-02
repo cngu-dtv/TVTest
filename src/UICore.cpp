@@ -404,11 +404,21 @@ bool CUICore::SetAudioStream(int Stream)
 		return false;
 
 	uint8_t ComponentTag;
-	const LibISDB::AnalyzerFilter *pAnalyzer = m_App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
-	if (pAnalyzer != nullptr)
-		ComponentTag = pAnalyzer->GetAudioComponentTag(m_App.CoreEngine.GetServiceIndex(), Stream);
-	else
-		ComponentTag = LibISDB::COMPONENT_TAG_INVALID;
+	if (m_App.CoreEngine.IsMMTStream()) {
+		const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer = m_App.CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+		LibISDB::MMTAnalyzerFilter::AssetInfo Asset;
+		if (pMMTAnalyzer != nullptr
+				&& pMMTAnalyzer->GetAudioAssetInfo(m_App.CoreEngine.GetServiceIndex(), Stream, &Asset))
+			ComponentTag = CAudioManager::MMTComponentTagToByte(Asset.ComponentTag);
+		else
+			ComponentTag = LibISDB::COMPONENT_TAG_INVALID;
+	} else {
+		const LibISDB::AnalyzerFilter *pAnalyzer = m_App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+		if (pAnalyzer != nullptr)
+			ComponentTag = pAnalyzer->GetAudioComponentTag(m_App.CoreEngine.GetServiceIndex(), Stream);
+		else
+			ComponentTag = LibISDB::COMPONENT_TAG_INVALID;
+	}
 
 	CAudioManager::AudioSelectInfo SelInfo;
 	if (!m_App.AudioManager.GetAudioSelectInfoByID(
@@ -456,12 +466,22 @@ bool CUICore::SelectAudio(const CAudioManager::AudioSelectInfo &Info, bool fUpda
 	const BYTE ComponentTag = CAudioManager::IDToComponentTag(Info.ID);
 
 	if (ComponentTag != LibISDB::COMPONENT_TAG_INVALID) {
-		const LibISDB::AnalyzerFilter *pAnalyzer = m_App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
-		if (pAnalyzer != nullptr) {
-			AudioIndex = pAnalyzer->GetAudioIndexByComponentTag(
-				m_App.CoreEngine.GetServiceIndex(), ComponentTag);
+		if (m_App.CoreEngine.IsMMTStream()) {
+			const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer = m_App.CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+			if (pMMTAnalyzer != nullptr) {
+				AudioIndex = pMMTAnalyzer->GetAudioAssetIndexByComponentTag(
+					m_App.CoreEngine.GetServiceIndex(), ComponentTag);
+			} else {
+				AudioIndex = -1;
+			}
 		} else {
-			AudioIndex = -1;
+			const LibISDB::AnalyzerFilter *pAnalyzer = m_App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+			if (pAnalyzer != nullptr) {
+				AudioIndex = pAnalyzer->GetAudioIndexByComponentTag(
+					m_App.CoreEngine.GetServiceIndex(), ComponentTag);
+			} else {
+				AudioIndex = -1;
+			}
 		}
 	} else {
 		AudioIndex = CAudioManager::IDToStreamIndex(Info.ID);
@@ -585,6 +605,15 @@ int CUICore::FormatCurrentAudioText(LPTSTR pszText, int MaxLength) const
 	const int NumAudio = GetNumAudioStreams();
 	LibISDB::AnalyzerFilter::EventAudioInfo AudioInfo;
 
+	// MMT は MPT の MH-音声コンポーネント記述子 (ARIB TR-B39 第1部 第4編 34.1.3.7) から取得する
+	const bool fMMT = m_App.CoreEngine.IsMMTStream();
+	const auto GetEventAudioInfo =
+		[&]() -> bool {
+			if (fMMT)
+				return m_App.CoreEngine.GetAudioComponentInfo(GetAudioStream(), &AudioInfo);
+			return pAnalyzer->GetEventAudioInfo(m_App.CoreEngine.GetServiceIndex(), GetAudioStream(), &AudioInfo);
+		};
+
 	if (NumAudio > 1)
 		Formatter.AppendFormat(TEXT("#{}: "), GetAudioStream() + 1);
 
@@ -592,7 +621,7 @@ int CUICore::FormatCurrentAudioText(LPTSTR pszText, int MaxLength) const
 		// Dual mono
 		const LibISDB::DirectShow::AudioDecoderFilter::DualMonoMode DualMonoMode = GetDualMonoMode();
 
-		if (pAnalyzer->GetEventAudioInfo(m_App.CoreEngine.GetServiceIndex(), GetAudioStream(), &AudioInfo)
+		if (GetEventAudioInfo()
 				&& AudioInfo.ComponentType == 0x02
 				&& AudioInfo.ESMultiLingualFlag
 				// ES multilingual flag が立っているのに両方日本語の場合がある
@@ -639,7 +668,7 @@ int CUICore::FormatCurrentAudioText(LPTSTR pszText, int MaxLength) const
 					TEXT("主+副音声"));
 		}
 	} else if (NumAudio > 1
-			&& pAnalyzer->GetEventAudioInfo(m_App.CoreEngine.GetServiceIndex(), GetAudioStream(), &AudioInfo)) {
+			&& GetEventAudioInfo()) {
 		TCHAR szFormat[16];
 
 		switch (NumChannels) {
@@ -735,9 +764,18 @@ bool CUICore::GetSelectedAudioText(LPTSTR pszText, int MaxLength) const
 
 	const LibISDB::AnalyzerFilter *pAnalyzer = m_App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
 	LibISDB::AnalyzerFilter::EventAudioInfo AudioInfo;
+	bool fAudioInfo;
 
-	if (pAnalyzer != nullptr
-			&& pAnalyzer->GetEventAudioInfo(m_App.CoreEngine.GetServiceIndex(), GetAudioStream(), &AudioInfo)) {
+	if (m_App.CoreEngine.IsMMTStream()) {
+		// MPT の MH-音声コンポーネント記述子
+		fAudioInfo = m_App.CoreEngine.GetAudioComponentInfo(GetAudioStream(), &AudioInfo);
+	} else {
+		fAudioInfo =
+			pAnalyzer != nullptr
+			&& pAnalyzer->GetEventAudioInfo(m_App.CoreEngine.GetServiceIndex(), GetAudioStream(), &AudioInfo);
+	}
+
+	if (fAudioInfo) {
 		if (AudioInfo.ComponentType == 0x02) {
 			// Dual mono
 			TCHAR szAudio1[64], szAudio2[64];

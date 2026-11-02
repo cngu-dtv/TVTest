@@ -80,10 +80,44 @@ int CAudioManager::FindAudioInfoByID(IDType ID) const
 
 int CAudioManager::GetDefaultAudio(AudioSelectInfo *pSelectInfo) const
 {
+	/*
+		MMT は再生できる音声から選び、言語の優先順位に当てはまるものが無ければ
+		エンジンの既定の音声 (ARIB TR-B39 第1部 第2編 4.7.2) にする
+		(OnServiceUpdated() はエンジンのロックを持ったまま呼ばれることがあるので、
+		 ロックの順序を合わせるために m_Lock を取る前にエンジンから取得する)
+	*/
+	const CCoreEngine &Engine = GetAppClass().CoreEngine;
+	const bool fMMT = Engine.IsMMTStream();
+	AudioComponentList PlayableList;
+	IDType EngineDefaultID = ID_INVALID;
+
+	if (fMMT) {
+		const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer = Engine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+		const int ServiceIndex = Engine.GetServiceIndex();
+		const int StreamCount = Engine.GetAudioStreamCount();
+		const int DefaultStream = Engine.GetDefaultAudioStream();
+
+		for (int i = 0; i < StreamCount; i++) {
+			LibISDB::MMTAnalyzerFilter::AssetInfo Asset;
+			BYTE ComponentTag = LibISDB::COMPONENT_TAG_INVALID;
+			if (pMMTAnalyzer != nullptr && pMMTAnalyzer->GetAudioAssetInfo(ServiceIndex, i, &Asset))
+				ComponentTag = MMTComponentTagToByte(Asset.ComponentTag);
+			const IDType ID = MakeID(i, ComponentTag);
+			if (Engine.IsAudioStreamPlayable(i))
+				PlayableList.push_back(ID);
+			if (i == DefaultStream)
+				EngineDefaultID = ID;
+		}
+	}
+
 	LibISDB::BlockLock Lock(m_Lock);
 
 	if (m_AudioList.empty())
 		return -1;
+
+	const auto IsPlayable = [&](const AudioInfo &Info) -> bool {
+		return !fMMT || std::ranges::find(PlayableList, Info.ID) != PlayableList.end();
+	};
 
 	const CAudioOptions &AudioOptions = GetAppClass().AudioOptions;
 
@@ -94,7 +128,8 @@ int CAudioManager::GetDefaultAudio(AudioSelectInfo *pSelectInfo) const
 			for (auto const &Priority : PriorityList) {
 				for (auto itAudio = m_AudioList.begin(); itAudio != m_AudioList.end(); ++itAudio) {
 					if (itAudio->Language == Priority.Language
-							&& itAudio->DualMono != DualMonoMode::Both) {
+							&& itAudio->DualMono != DualMonoMode::Both
+							&& IsPlayable(*itAudio)) {
 						if (!Priority.fSub
 								|| itAudio != m_AudioList.begin()
 								|| itAudio->DualMono == CAudioManager::DualMonoMode::Sub) {
@@ -110,8 +145,15 @@ int CAudioManager::GetDefaultAudio(AudioSelectInfo *pSelectInfo) const
 		}
 	}
 
+	auto itDefault = m_AudioList.begin();
+	if (EngineDefaultID != ID_INVALID) {
+		auto it = std::ranges::find(m_AudioList, EngineDefaultID, &AudioInfo::ID);
+		if (it != m_AudioList.end())
+			itDefault = it;
+	}
+
 	if (pSelectInfo != nullptr) {
-		const AudioInfo &Info = m_AudioList.front();
+		const AudioInfo &Info = *itDefault;
 
 		pSelectInfo->ID = Info.ID;
 		if (Info.IsDualMono()) {
@@ -124,7 +166,7 @@ int CAudioManager::GetDefaultAudio(AudioSelectInfo *pSelectInfo) const
 		}
 	}
 
-	return 0;
+	return static_cast<int>(std::distance(m_AudioList.begin(), itDefault));
 }
 
 
@@ -242,22 +284,73 @@ bool CAudioManager::OnServiceUpdated()
 	if (pAnalyzer == nullptr)
 		return false;
 
+	const bool fMMT = Engine.IsMMTStream();
 	const int StreamCount = Engine.GetAudioStreamCount();
 	const int ServiceIndex = Engine.GetServiceIndex();
 
 	AudioComponentList ComponentList;
+	bool fEventAudioListChanged = false;
+	bool fMMTConditionChanged = false;
 
 	ComponentList.resize(StreamCount);
-	for (int i = 0; i < StreamCount; i++)
-		ComponentList[i] = MakeID(i, pAnalyzer->GetAudioComponentTag(ServiceIndex, i));
+	if (fMMT) {
+		/*
+			MMT は MPT の MH-音声コンポーネント記述子から音声のリストを作成する
+			(MH-EIT の記述子は番組単位の情報で、MPT の記述子がアセットの現在の内容を表す
+			 ARIB TR-B39 第1部 第4編 34.1.3.7 / 34.17.9)
+		*/
+		const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer = Engine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+		LibISDB::EventInfo::AudioInfoList MMTAudioList(StreamCount);
+		AudioList EventAudioList;
+
+		for (int i = 0; i < StreamCount; i++) {
+			LibISDB::EventInfo::AudioInfo &Info = MMTAudioList[i];
+			LibISDB::MMTAnalyzerFilter::AssetInfo Asset;
+			BYTE ComponentTag = LibISDB::COMPONENT_TAG_INVALID;
+
+			if (pMMTAnalyzer != nullptr
+					&& pMMTAnalyzer->GetAudioAssetInfo(ServiceIndex, i, &Asset)) {
+				ComponentTag = MMTComponentTagToByte(Asset.ComponentTag);
+				if (Asset.HasAudioInfo) {
+					Info = Asset.AudioInfo;
+					Info.ComponentTag = ComponentTag;
+					AppendEventAudio(Info, &EventAudioList);
+				}
+			}
+			Info.ComponentTag = ComponentTag;
+			ComponentList[i] = MakeID(i, ComponentTag);
+		}
+
+		// サイマル・多言語の条件が変わった場合は既定の音声に戻す (ARIB TR-B39 第1部 第2編 4.7.2)
+		fMMTConditionChanged =
+			m_fMMT && IsMMTAudioSelectionConditionChanged(MMTAudioList, m_MMTAudioComponentList);
+		m_MMTAudioComponentList = std::move(MMTAudioList);
+
+		if (m_EventAudioList != EventAudioList) {
+			m_EventAudioList = std::move(EventAudioList);
+			fEventAudioListChanged = true;
+		}
+	} else {
+		for (int i = 0; i < StreamCount; i++)
+			ComponentList[i] = MakeID(i, pAnalyzer->GetAudioComponentTag(ServiceIndex, i));
+
+		// MMT の時に作成したリストを破棄する
+		if (m_fMMT) {
+			m_MMTAudioComponentList.clear();
+			m_EventAudioList.clear();
+			fEventAudioListChanged = true;
+		}
+	}
+
+	m_fMMT = fMMT;
 
 	const WORD TransportStreamID = Engine.GetTransportStreamID();
 	const WORD ServiceID = Engine.GetServiceID();
 	const bool fServiceChanged =
 		TransportStreamID != m_CurTransportStreamID || ServiceID != m_CurServiceID;
 
-	if (m_AudioComponentList == ComponentList) {
-		if (!fServiceChanged)
+	if (m_AudioComponentList == ComponentList && !fEventAudioListChanged) {
+		if (!fServiceChanged && !fMMTConditionChanged)
 			return false;
 	} else {
 		m_AudioComponentList = std::move(ComponentList);
@@ -292,7 +385,8 @@ bool CAudioManager::OnServiceUpdated()
 	} else {
 		// 選択されていたIDのストリームが無くなったらリセット
 		if (m_SelectedAudio.ID != ID_INVALID) {
-			if (std::ranges::find(
+			if (fMMTConditionChanged
+					|| std::ranges::find(
 						m_AudioComponentList,
 						m_SelectedAudio.ID) == m_AudioComponentList.end())
 				SetSelectedAudio(nullptr);
@@ -306,73 +400,20 @@ bool CAudioManager::OnServiceUpdated()
 bool CAudioManager::OnEventUpdated()
 {
 	// EIT の情報から音声のリストを作成
+	// (MMT は MPT の情報から OnServiceUpdated() で作成する)
 	LibISDB::BlockLock Lock(m_Lock);
 	const CCoreEngine &Engine = GetAppClass().CoreEngine;
 	const LibISDB::AnalyzerFilter *pAnalyzer = Engine.GetFilter<LibISDB::AnalyzerFilter>();
+	const bool fMMT = Engine.IsMMTStream();
 	AudioList EventAudioList;
 
-	if (pAnalyzer != nullptr) {
+	if (pAnalyzer != nullptr && !fMMT) {
 		LibISDB::AnalyzerFilter::EventAudioList EITAudioList;
 
 		pAnalyzer->GetEventAudioList(Engine.GetServiceIndex(), &EITAudioList);
 
-		for (auto const &EventAudio : EITAudioList) {
-			AudioInfo Audio1;
-
-			Audio1.ComponentType = EventAudio.ComponentType;
-			Audio1.ComponentTag = EventAudio.ComponentTag;
-			if (Audio1.IsDualMono()) {
-				Audio1.DualMono = DualMonoMode::Main;
-				Audio1.fMultiLingual =
-					EventAudio.ESMultiLingualFlag &&
-					EventAudio.LanguageCode != EventAudio.LanguageCode2;
-			} else {
-				Audio1.DualMono = DualMonoMode::Invalid;
-				Audio1.fMultiLingual = false;
-			}
-			Audio1.Language = EventAudio.LanguageCode;
-			Audio1.Language2 = 0;
-			String::size_type DelimiterPos = EventAudio.Text.find(TEXT('\r'));
-			if (DelimiterPos == String::npos)
-				Audio1.Text = EventAudio.Text;
-			else
-				Audio1.Text = EventAudio.Text.substr(0, DelimiterPos);
-
-			EventAudioList.push_back(Audio1);
-
-			if (Audio1.IsDualMono()) {
-				AudioInfo Audio2;
-
-				Audio2.ComponentType = EventAudio.ComponentType;
-				Audio2.ComponentTag = EventAudio.ComponentTag;
-				Audio2.DualMono = DualMonoMode::Sub;
-				Audio2.fMultiLingual = Audio1.fMultiLingual;
-				Audio2.Language =
-					EventAudio.ESMultiLingualFlag ?
-					EventAudio.LanguageCode2 : EventAudio.LanguageCode;
-				Audio2.Language2 = 0;
-				if (DelimiterPos != String::npos) {
-					DelimiterPos++;
-					if (DelimiterPos < EventAudio.Text.length()
-							&& EventAudio.Text[DelimiterPos] == TEXT('\n'))
-						DelimiterPos++;
-					Audio2.Text = EventAudio.Text.substr(DelimiterPos);
-				}
-
-				EventAudioList.push_back(Audio2);
-
-				Audio1.DualMono = DualMonoMode::Both;
-				Audio1.Language2 = Audio2.Language;
-				if (DelimiterPos != String::npos) {
-					Audio1.Text += TEXT('+');
-					Audio1.Text += Audio2.Text;
-				} else {
-					Audio1.Text.clear();
-				}
-
-				EventAudioList.push_back(Audio1);
-			}
-		}
+		for (auto const &EventAudio : EITAudioList)
+			AppendEventAudio(EventAudio, &EventAudioList);
 	}
 
 	bool fChanged = false;
@@ -386,13 +427,97 @@ bool CAudioManager::OnEventUpdated()
 		m_CurEventID = EventID;
 	}
 
-	if (m_EventAudioList != EventAudioList) {
+	if (!fMMT && m_EventAudioList != EventAudioList) {
 		m_EventAudioList = std::move(EventAudioList);
 		MakeAudioList();
 		fChanged = true;
 	}
 
 	return fChanged;
+}
+
+
+void CAudioManager::AppendEventAudio(const LibISDB::EventInfo::AudioInfo &EventAudio, AudioList *pList)
+{
+	AudioInfo Audio1;
+
+	Audio1.ComponentType = EventAudio.ComponentType;
+	Audio1.ComponentTag = EventAudio.ComponentTag;
+	if (Audio1.IsDualMono()) {
+		Audio1.DualMono = DualMonoMode::Main;
+		Audio1.fMultiLingual =
+			EventAudio.ESMultiLingualFlag &&
+			EventAudio.LanguageCode != EventAudio.LanguageCode2;
+	} else {
+		Audio1.DualMono = DualMonoMode::Invalid;
+		Audio1.fMultiLingual = false;
+	}
+	Audio1.Language = EventAudio.LanguageCode;
+	Audio1.Language2 = 0;
+	String::size_type DelimiterPos = EventAudio.Text.find(TEXT('\r'));
+	if (DelimiterPos == String::npos)
+		Audio1.Text = EventAudio.Text;
+	else
+		Audio1.Text = EventAudio.Text.substr(0, DelimiterPos);
+
+	pList->push_back(Audio1);
+
+	if (Audio1.IsDualMono()) {
+		AudioInfo Audio2;
+
+		Audio2.ComponentType = EventAudio.ComponentType;
+		Audio2.ComponentTag = EventAudio.ComponentTag;
+		Audio2.DualMono = DualMonoMode::Sub;
+		Audio2.fMultiLingual = Audio1.fMultiLingual;
+		Audio2.Language =
+			EventAudio.ESMultiLingualFlag ?
+			EventAudio.LanguageCode2 : EventAudio.LanguageCode;
+		Audio2.Language2 = 0;
+		if (DelimiterPos != String::npos) {
+			DelimiterPos++;
+			if (DelimiterPos < EventAudio.Text.length()
+					&& EventAudio.Text[DelimiterPos] == TEXT('\n'))
+				DelimiterPos++;
+			Audio2.Text = EventAudio.Text.substr(DelimiterPos);
+		}
+
+		pList->push_back(Audio2);
+
+		Audio1.DualMono = DualMonoMode::Both;
+		Audio1.Language2 = Audio2.Language;
+		if (DelimiterPos != String::npos) {
+			Audio1.Text += TEXT('+');
+			Audio1.Text += Audio2.Text;
+		} else {
+			Audio1.Text.clear();
+		}
+
+		pList->push_back(Audio1);
+	}
+}
+
+
+bool CAudioManager::IsMMTAudioSelectionConditionChanged(
+	const LibISDB::EventInfo::AudioInfoList &List1, const LibISDB::EventInfo::AudioInfoList &List2)
+{
+	// component_tag、符号化方式、サイマル、多言語の条件 (音声モードの変化は含めない)
+	if (List1.size() != List2.size())
+		return true;
+
+	for (size_t i = 0; i < List1.size(); i++) {
+		const LibISDB::EventInfo::AudioInfo &Info1 = List1[i];
+		const LibISDB::EventInfo::AudioInfo &Info2 = List2[i];
+
+		if (Info1.ComponentTag != Info2.ComponentTag
+				|| Info1.StreamContent != Info2.StreamContent
+				|| Info1.SimulcastGroupTag != Info2.SimulcastGroupTag
+				|| Info1.ESMultiLingualFlag != Info2.ESMultiLingualFlag
+				|| Info1.LanguageCode != Info2.LanguageCode
+				|| Info1.LanguageCode2 != Info2.LanguageCode2)
+			return true;
+	}
+
+	return false;
 }
 
 

@@ -26,6 +26,7 @@
 #include "Settings.h"
 #include "DarkMode.h"
 #include "resource.h"
+#include "LibISDB/LibISDB/MMT/TTMLCaption.hpp"
 #include <utility>
 #include "Common/DebugDef.h"
 
@@ -162,6 +163,7 @@ void CCaptionPanel::Reset()
 	if (m_hwndEdit != nullptr)
 		::SetWindowText(m_hwndEdit, TEXT(""));
 	m_DRCSMap.Reset();
+	m_fLastTTMLValid = false;
 }
 
 
@@ -666,6 +668,68 @@ void CCaptionPanel::OnCaption(
 			AddNextCaption(Language);
 		}
 	}
+}
+
+
+void CCaptionPanel::OnTTMLCaption(
+	LibISDB::CaptionFilter *pFilter, const LibISDB::CaptionFilter::TTMLCaptionInfo &Info)
+{
+	// 文字スーパーは 2K と同じく表示しない
+	if (Info.Superimpose || (Info.pDocument == nullptr))
+		return;
+
+	BlockLock Lock(m_Lock);
+
+	// TLV/MMT では 1 アセット 1 言語
+	constexpr BYTE Language = 0;
+
+	if (Language >= m_LanguageList.size() || m_hwnd == nullptr || !m_fEnable)
+		return;
+
+	if (m_fLastTTMLValid
+			&& (Info.PacketID == m_LastTTMLPacketID)
+			&& (Info.MPUSequenceNumber == m_LastTTMLMPUSequenceNumber))
+		return;
+	m_fLastTTMLValid = true;
+	m_LastTTMLPacketID = Info.PacketID;
+	m_LastTTMLMPUSequenceNumber = Info.MPUSequenceNumber;
+
+	LibISDB::TTMLCaptionDecoder::ParagraphList ParagraphList;
+	if (!LibISDB::TTMLCaptionDecoder::Decode(Info.pDocument, Info.DocumentSize, &ParagraphList))
+		return;
+
+	// 2K と同じく、画面内の行はつなげる
+	String Text;
+	for (const auto &Paragraph : ParagraphList)
+		Text += Paragraph.Text;
+
+	// 外字は私用領域の符号で書かれ (ARIB TR-B39 第1部 第3編 8.5.8)、グリフ (SVG) は表示できない
+	for (size_t i = 0; i < Text.length(); i++) {
+		if ((Text[i] >= 0xE000) && (Text[i] <= 0xF8FF)) {
+			Text[i] = L'□';
+		} else if ((Text[i] >= 0xDB80) && (Text[i] <= 0xDBFF) && (i + 1 < Text.length())) {
+			// 補助私用領域 (U+F0000-U+10FFFF)
+			Text.replace(i, 2, 1, L'□');
+		}
+	}
+
+	LanguageInfo &Lang = m_LanguageList[Language];
+
+	// 文書ごとに画面全体を書き換えるので、2K の画面消去と同じ扱いにする
+	if (Text.empty()) {
+		// 消去の文書 (ARIB STD-B62 第1編 第3部 3.8)
+		if (Lang.fClearLast)
+			return;
+		Lang.fClearLast = true;
+		Lang.NextCaption += TEXT("\r\n");
+	} else {
+		Lang.fClearLast = false;
+		Lang.NextCaption += TEXT("\r\n");
+		Lang.NextCaption += Text;
+	}
+	Lang.fContinue = false;
+
+	AddNextCaption(Language);
 }
 
 

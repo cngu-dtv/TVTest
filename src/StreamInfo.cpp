@@ -25,6 +25,7 @@
 #include "DialogUtil.h"
 #include "LibISDB/LibISDB/TS/TSInformation.hpp"
 #include "resource.h"
+#include <map>
 #include "Common/DebugDef.h"
 
 
@@ -47,6 +48,7 @@ private:
 	INT_PTR DlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) override;
 
 	void SetService();
+	void SetMMTService();
 
 	static void GetTreeViewText(HWND hwndTree, HTREEITEM hItem, bool fSiblings, String *pText, int Level = 0);
 	static void ExpandTreeViewItem(HWND hwndTree, HTREEITEM hItem, unsigned int Flags);
@@ -166,8 +168,63 @@ static void FormatEsInfo(
 		Es.ComponentTag);
 }
 
+// 衛星分配システム記述子の偏波 (ARIB STD-B10 第2部 表 6-9)
+static LPCTSTR GetPolarizationText(BYTE Polarization)
+{
+	switch (Polarization) {
+	case 0: return TEXT("水平偏波");
+	case 1: return TEXT("垂直偏波");
+	case 2: return TEXT("左旋");
+	case 3: return TEXT("右旋");
+	}
+	return TEXT("?");
+}
+
+static void GetMMTAssetTypeText(std::uint32_t AssetType, TCHAR (&szText)[5])
+{
+	for (int i = 0; i < 4; i++) {
+		const TCHAR c = static_cast<TCHAR>((AssetType >> ((3 - i) * 8)) & 0xFF);
+		szText[i] = ((c >= 0x20) && (c < 0x7F)) ? c : TEXT('?');
+	}
+	szText[4] = TEXT('\0');
+}
+
+static void FormatMMTAssetInfo(
+	LPCTSTR pszName, int Index, const LibISDB::MMTAnalyzerFilter::AssetInfo &Asset, bool fAudio,
+	LPTSTR pszText, size_t MaxText)
+{
+	TCHAR szAssetType[5];
+	GetMMTAssetTypeText(Asset.AssetType, szAssetType);
+
+	size_t Length = StringFormat(
+		pszText, MaxText,
+		TEXT("{}{} : packet_id {:#04x} ({}) / asset type {}"),
+		pszName, Index + 1, Asset.PacketID, Asset.PacketID, szAssetType);
+	if (fAudio && (Asset.StreamType != LibISDB::STREAM_TYPE_INVALID)) {
+		const LPCTSTR pszStreamType = LibISDB::GetStreamTypeText(Asset.StreamType);
+		Length += StringFormat(
+			pszText + Length, MaxText - Length,
+			TEXT(" / stream type {:#02x} ({})"),
+			Asset.StreamType, pszStreamType != nullptr ? pszStreamType : TEXT("?"));
+	}
+	Length += StringFormat(
+		pszText + Length, MaxText - Length,
+		TEXT(" / component tag {:#04x}"), Asset.ComponentTag);
+	if (fAudio && Asset.HasAudioInfo) {
+		const LPCTSTR pszMode = LibISDB::GetAudioComponentTypeText_ja(Asset.AudioInfo.ComponentType);
+		StringFormat(
+			pszText + Length, MaxText - Length,
+			TEXT(" / {}"), pszMode != nullptr ? pszMode : TEXT("?"));
+	}
+}
+
 void CStreamInfoPage::SetService()
 {
+	if (GetAppClass().CoreEngine.IsMMTStream()) {
+		SetMMTService();
+		return;
+	}
+
 	const LibISDB::AnalyzerFilter *pAnalyzer =
 		GetAppClass().CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
 	if (pAnalyzer == nullptr)
@@ -685,11 +742,12 @@ void CStreamInfoPage::SetService()
 
 					StringFormat(
 						szText,
-						TEXT("TS{0} : TSID {1:#04x} ({1}) / 周波数 {2}.{3:05} GHz"),
+						TEXT("TS{0} : TSID {1:#04x} ({1}) / 周波数 {2}.{3:05} GHz / {4}"),
 						i + 1,
 						Info.TransportStreamID,
 						Info.Frequency / 100000,
-						Info.Frequency % 100000);
+						Info.Frequency % 100000,
+						GetPolarizationText(Info.Polarization));
 					tvis.hParent = hItem;
 					tvis.item.state = 0;
 					tvis.item.cChildren = 0;
@@ -735,6 +793,372 @@ void CStreamInfoPage::SetService()
 						TreeView_InsertItem(hwndTree, &tvis);
 					}
 				}
+			}
+		}
+	}
+}
+
+
+void CStreamInfoPage::SetMMTService()
+{
+	const CAppMain &App = GetAppClass();
+	const LibISDB::MMTAnalyzerFilter *pAnalyzer =
+		App.CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+	if (pAnalyzer == nullptr)
+		return;
+
+	TCHAR szText[1024];
+
+	// TLV には TS 名に当たるものが無い
+	const WORD TLVStreamID = pAnalyzer->GetTLVStreamID();
+	if (TLVStreamID != LibISDB::TRANSPORT_STREAM_ID_INVALID)
+		StringFormat(szText, TEXT("TLV stream ID {0:#04x} ({0})"), TLVStreamID);
+	else
+		szText[0] = '\0';
+	::SetDlgItemText(m_hDlg, IDC_STREAMINFO_STREAM, szText);
+
+	const WORD NID = pAnalyzer->GetNetworkID();
+	if (NID != LibISDB::NETWORK_ID_INVALID) {
+		const size_t Length = StringFormat(szText, TEXT("NID {0:#04x} ({0})"), NID);
+		String Name;
+		if (pAnalyzer->GetNetworkName(&Name) && !Name.empty())
+			StringFormat(szText + Length, lengthof(szText) - Length, TEXT(" {}"), Name);
+	} else {
+		szText[0] = '\0';
+	}
+	::SetDlgItemText(m_hDlg, IDC_STREAMINFO_NETWORK, szText);
+
+	LibISDB::MMTAnalyzerFilter::ServiceList ServiceList;
+	pAnalyzer->GetServiceList(&ServiceList);
+
+	const HWND hwndTree = ::GetDlgItem(m_hDlg, IDC_STREAMINFO_SERVICE);
+	TVINSERTSTRUCT tvis;
+	HTREEITEM hItem;
+
+	TreeView_DeleteAllItems(hwndTree);
+
+	// サービス一覧
+	tvis.hParent = TVI_ROOT;
+	tvis.hInsertAfter = TVI_LAST;
+	tvis.item.mask = TVIF_STATE | TVIF_TEXT | TVIF_CHILDREN;
+	tvis.item.state = TVIS_EXPANDED;
+	tvis.item.stateMask = ~0U;
+	tvis.item.pszText = const_cast<LPTSTR>(TEXT("サービス"));
+	tvis.item.cChildren = !ServiceList.empty() ? 1 : 0;
+	hItem = TreeView_InsertItem(hwndTree, &tvis);
+	if (hItem != nullptr) {
+		for (int i = 0; i < static_cast<int>(ServiceList.size()); i++) {
+			const LibISDB::MMTAnalyzerFilter::ServiceInfo &ServiceInfo = ServiceList[i];
+
+			tvis.hParent = hItem;
+			tvis.item.state = 0;
+			tvis.item.cChildren = 1;
+			size_t Length = StringFormat(szText, TEXT("サービス{}"), i + 1);
+			if (!ServiceInfo.ServiceName.empty())
+				Length += StringFormat(
+					szText + Length, lengthof(szText) - Length,
+					TEXT(" ({})"), ServiceInfo.ServiceName);
+			Length += StringFormat(
+				szText + Length, lengthof(szText) - Length,
+				TEXT(" : SID {0:#04x} ({0})"), ServiceInfo.ServiceID);
+			if (ServiceInfo.ServiceType != LibISDB::SERVICE_TYPE_INVALID) {
+				StringFormat(
+					szText + Length, lengthof(szText) - Length,
+					TEXT(" / Type {:#02x}"), ServiceInfo.ServiceType);
+			}
+			tvis.item.pszText = szText;
+			tvis.hParent = TreeView_InsertItem(hwndTree, &tvis);
+
+			tvis.item.cChildren = 0;
+			StringFormat(szText, TEXT("MPT : packet_id {0:#04x} ({0})"), ServiceInfo.MPTPacketID);
+			TreeView_InsertItem(hwndTree, &tvis);
+
+			for (int j = 0; j < static_cast<int>(ServiceInfo.VideoAssetList.size()); j++) {
+				FormatMMTAssetInfo(
+					TEXT("映像"), j, ServiceInfo.VideoAssetList[j], false,
+					szText, lengthof(szText));
+				TreeView_InsertItem(hwndTree, &tvis);
+			}
+
+			for (int j = 0; j < static_cast<int>(ServiceInfo.AudioAssetList.size()); j++) {
+				FormatMMTAssetInfo(
+					TEXT("音声"), j, ServiceInfo.AudioAssetList[j], true,
+					szText, lengthof(szText));
+				TreeView_InsertItem(hwndTree, &tvis);
+			}
+
+			int CaptionCount = 0, SuperimposeCount = 0;
+			for (const auto &Asset : ServiceInfo.CaptionAssetList) {
+				if ((Asset.ComponentTag >= LibISDB::MMT_COMPONENT_TAG_SUPERIMPOSE_FIRST)
+						&& (Asset.ComponentTag <= LibISDB::MMT_COMPONENT_TAG_SUPERIMPOSE_LAST)) {
+					FormatMMTAssetInfo(
+						TEXT("文字スーパー"), SuperimposeCount++, Asset, false,
+						szText, lengthof(szText));
+				} else {
+					FormatMMTAssetInfo(
+						TEXT("字幕"), CaptionCount++, Asset, false,
+						szText, lengthof(szText));
+				}
+				TreeView_InsertItem(hwndTree, &tvis);
+			}
+
+			for (int j = 0; j < static_cast<int>(ServiceInfo.ApplicationAssetList.size()); j++) {
+				FormatMMTAssetInfo(
+					TEXT("データ"), j, ServiceInfo.ApplicationAssetList[j], false,
+					szText, lengthof(szText));
+				TreeView_InsertItem(hwndTree, &tvis);
+			}
+
+			for (int j = 0; j < static_cast<int>(ServiceInfo.OtherAssetList.size()); j++) {
+				FormatMMTAssetInfo(
+					TEXT("その他"), j, ServiceInfo.OtherAssetList[j], false,
+					szText, lengthof(szText));
+				TreeView_InsertItem(hwndTree, &tvis);
+			}
+
+			for (int j = 0; j < static_cast<int>(ServiceInfo.ECMList.size()); j++) {
+				StringFormat(
+					szText,
+					TEXT("ECM{0} : packet_id {1:#04x} ({1}) / CA system ID {2:#02x}"),
+					j + 1, ServiceInfo.ECMList[j].PacketID, ServiceInfo.ECMList[j].CASystemID);
+				TreeView_InsertItem(hwndTree, &tvis);
+			}
+
+			int EMTCount = 0;
+			for (int j = 0; j < static_cast<int>(ServiceInfo.ApplicationServiceList.size()); j++) {
+				const LibISDB::MMTAnalyzerFilter::ApplicationServiceInfo &App = ServiceInfo.ApplicationServiceList[j];
+
+				Length = StringFormat(szText, TEXT("アプリケーション{} : "), j + 1);
+				if (App.ApplicationFormat == LibISDB::ApplicationServiceDescriptor::APPLICATION_FORMAT_HTML5)
+					Length += StringFormat(szText + Length, lengthof(szText) - Length, TEXT("ARIB-HTML5"));
+				else
+					Length += StringFormat(szText + Length, lengthof(szText) - Length, TEXT("format {:#x}"), App.ApplicationFormat);
+				// ARIB STD-B60 表 7-88
+				static const LPCTSTR ResolutionList[] = {TEXT("1920x1080"), TEXT("3840x2160"), TEXT("7680x4320")};
+				if (App.DocumentResolution < lengthof(ResolutionList))
+					Length += StringFormat(szText + Length, lengthof(szText) - Length, TEXT(" / {}"), ResolutionList[App.DocumentResolution]);
+				else
+					Length += StringFormat(szText + Length, lengthof(szText) - Length, TEXT(" / resolution {:#x}"), App.DocumentResolution);
+				if (App.AITPacketID != LibISDB::MMT_PACKET_ID_INVALID)
+					Length += StringFormat(
+						szText + Length, lengthof(szText) - Length,
+						TEXT(" / MH-AIT packet_id {0:#04x} ({0})"), App.AITPacketID);
+				if (App.DTMessagePacketID != LibISDB::MMT_PACKET_ID_INVALID)
+					StringFormat(
+						szText + Length, lengthof(szText) - Length,
+						TEXT(" / データ伝送 packet_id {0:#04x} ({0})"), App.DTMessagePacketID);
+				TreeView_InsertItem(hwndTree, &tvis);
+
+				for (const auto &EMT : App.EMTList) {
+					StringFormat(
+						szText,
+						TEXT("EMT{0} : tag {1:#02x} / packet_id {2:#04x} ({2})"),
+						++EMTCount, EMT.EMTTag, EMT.PacketID);
+					TreeView_InsertItem(hwndTree, &tvis);
+				}
+			}
+		}
+	}
+
+	// チャンネルファイル用フォーマット一覧
+	const CChannelInfo *pChannelInfo = App.ChannelManager.GetCurrentChannelInfo();
+	if (pChannelInfo != nullptr) {
+		tvis.hParent = TVI_ROOT;
+		tvis.hInsertAfter = TVI_LAST;
+		tvis.item.mask = TVIF_STATE | TVIF_TEXT | TVIF_CHILDREN;
+		tvis.item.state = TVIS_EXPANDED;
+		tvis.item.stateMask = ~0U;
+		tvis.item.pszText = const_cast<LPTSTR>(TEXT("チャンネルファイル用フォーマット"));
+		tvis.item.cChildren = !ServiceList.empty() ? 1 : 0;
+		hItem = TreeView_InsertItem(hwndTree, &tvis);
+		if (hItem != nullptr) {
+			for (int i = 0; i < static_cast<int>(ServiceList.size()); i++) {
+				const LibISDB::MMTAnalyzerFilter::ServiceInfo &ServiceInfo = ServiceList[i];
+
+				tvis.hParent = hItem;
+				tvis.item.state = 0;
+				tvis.item.cChildren = 0;
+				size_t Length;
+				if (!ServiceInfo.ServiceName.empty())
+					Length = StringFormat(szText, TEXT("{}"), ServiceInfo.ServiceName);
+				else
+					Length = StringFormat(szText, TEXT("サービス{}"), i + 1);
+				// リモコンキーは TLV-NIT でサービスごとに送られる
+				StringFormat(
+					szText + Length, lengthof(szText) - Length,
+					TEXT(",{},{},{},{},{},{},{}"),
+					pChannelInfo->GetSpace(),
+					pChannelInfo->GetChannelIndex(),
+					pAnalyzer->GetRemoteControlKeyID(ServiceInfo.ServiceID),
+					ServiceInfo.ServiceType,
+					ServiceInfo.ServiceID, NID, TLVStreamID);
+				tvis.item.pszText = szText;
+				TreeView_InsertItem(hwndTree, &tvis);
+			}
+		}
+	}
+
+	// ネットワークTLVストリーム一覧
+	LibISDB::MMTAnalyzerFilter::NetworkStreamList StreamList;
+	if (pAnalyzer->GetNetworkStreamList(&StreamList) && !StreamList.empty()) {
+		tvis.hParent = TVI_ROOT;
+		tvis.hInsertAfter = TVI_LAST;
+		tvis.item.mask = TVIF_STATE | TVIF_TEXT | TVIF_CHILDREN;
+		tvis.item.state = 0;
+		tvis.item.stateMask = ~0U;
+		tvis.item.pszText = const_cast<LPTSTR>(TEXT("ネットワークTLVストリーム (TLV-NIT)"));
+		tvis.item.cChildren = 1;
+		hItem = TreeView_InsertItem(hwndTree, &tvis);
+		if (hItem != nullptr) {
+			for (size_t i = 0; i < StreamList.size(); i++) {
+				const LibISDB::MMTAnalyzerFilter::NetworkStreamInfo &StreamInfo = StreamList[i];
+
+				if (StreamInfo.OriginalNetworkID == NID) {
+					StringFormat(
+						szText,
+						TEXT("TLV{0} : TLV stream ID {1:#04x} ({1})"),
+						i + 1,
+						StreamInfo.TLVStreamID);
+					tvis.hParent = hItem;
+					tvis.item.state = 0;
+					tvis.item.cChildren = 1;
+					tvis.item.pszText = szText;
+					tvis.hParent = TreeView_InsertItem(hwndTree, &tvis);
+					tvis.item.cChildren = 0;
+					for (size_t j = 0; j < StreamInfo.ServiceList.size(); j++) {
+						const LibISDB::MMTAnalyzerFilter::NetworkServiceInfo &ServiceInfo = StreamInfo.ServiceList[j];
+						StringFormat(
+							szText,
+							TEXT("サービス{0} : SID {1:#04x} ({1}) / Type {2:#02x}"),
+							j + 1,
+							ServiceInfo.ServiceID,
+							ServiceInfo.ServiceType);
+						TreeView_InsertItem(hwndTree, &tvis);
+					}
+				}
+			}
+		}
+	}
+
+	// ネットワークサービス一覧
+	LibISDB::MMTAnalyzerFilter::SDTStreamList SDTList;
+	if (pAnalyzer->GetSDTStreamList(&SDTList) && !SDTList.empty()) {
+		tvis.hParent = TVI_ROOT;
+		tvis.hInsertAfter = TVI_LAST;
+		tvis.item.mask = TVIF_STATE | TVIF_TEXT | TVIF_CHILDREN;
+		tvis.item.state = 0;
+		tvis.item.stateMask = ~0U;
+		tvis.item.pszText = const_cast<LPTSTR>(TEXT("ネットワークサービス (MH-SDT)"));
+		tvis.item.cChildren = 1;
+		hItem = TreeView_InsertItem(hwndTree, &tvis);
+		if (hItem != nullptr) {
+			for (size_t i = 0; i < SDTList.size(); i++) {
+				const LibISDB::MMTAnalyzerFilter::SDTStreamInfo &StreamInfo = SDTList[i];
+
+				if (StreamInfo.OriginalNetworkID == NID) {
+					StringFormat(
+						szText,
+						TEXT("TLV{0} : TLV stream ID {1:#04x} ({1})"),
+						i + 1,
+						StreamInfo.TLVStreamID);
+					tvis.hParent = hItem;
+					tvis.item.state = 0;
+					tvis.item.cChildren = 1;
+					tvis.item.pszText = szText;
+					tvis.hParent = TreeView_InsertItem(hwndTree, &tvis);
+					tvis.item.cChildren = 0;
+					for (size_t j = 0; j < StreamInfo.ServiceList.size(); j++) {
+						const LibISDB::MMTAnalyzerFilter::SDTServiceInfo &ServiceInfo = StreamInfo.ServiceList[j];
+						StringFormat(
+							szText,
+							TEXT("サービス{0} ({1}) : SID {2:#04x} ({2}) / Type {3:#02x} / CA {4}"),
+							j + 1,
+							ServiceInfo.ServiceName,
+							ServiceInfo.ServiceID,
+							ServiceInfo.ServiceType,
+							ServiceInfo.FreeCAMode);
+						TreeView_InsertItem(hwndTree, &tvis);
+					}
+				}
+			}
+		}
+	}
+
+	// ブロードキャスタ情報 (MH-BIT の SI 伝送パラメータは取得していない)
+	LibISDB::MMTAnalyzerFilter::BITNetworkList BITList;
+	if (pAnalyzer->GetBITNetworkList(&BITList) && !BITList.empty()) {
+		tvis.hParent = TVI_ROOT;
+		tvis.hInsertAfter = TVI_LAST;
+		tvis.item.mask = TVIF_STATE | TVIF_TEXT;
+		tvis.item.state = 0;
+		tvis.item.stateMask = ~0U;
+		tvis.item.pszText = const_cast<LPTSTR>(TEXT("ブロードキャスタ (MH-BIT)"));
+		hItem = TreeView_InsertItem(hwndTree, &tvis);
+		if (hItem != nullptr) {
+			tvis.item.pszText = szText;
+
+			for (size_t i = 0; i < BITList.size(); i++) {
+				const LibISDB::MMTAnalyzerFilter::BITNetworkInfo &NetworkInfo = BITList[i];
+
+				StringFormat(
+					szText,
+					TEXT("ネットワーク{0} : ONID {1:#04x} ({1})"),
+					i + 1,
+					NetworkInfo.OriginalNetworkID);
+				tvis.hParent = hItem;
+				const HTREEITEM hNetworkItem = TreeView_InsertItem(hwndTree, &tvis);
+
+				for (const auto &Broadcaster : NetworkInfo.BroadcasterList) {
+					StringFormat(
+						szText,
+						TEXT("ブロードキャスタID {} / {}"),
+						Broadcaster.BroadcasterID,
+						Broadcaster.BroadcasterName);
+					tvis.hParent = hNetworkItem;
+					tvis.hParent = TreeView_InsertItem(hwndTree, &tvis);
+
+					for (size_t j = 0; j < Broadcaster.ServiceList.size(); j++) {
+						StringFormat(
+							szText,
+							TEXT("サービス{0} : SID {1:#04x} ({1}) / Type {2:#02x}"),
+							j + 1,
+							Broadcaster.ServiceList[j].ServiceID,
+							Broadcaster.ServiceList[j].ServiceType);
+						TreeView_InsertItem(hwndTree, &tvis);
+					}
+				}
+			}
+		}
+	}
+
+	// 衛星分配システム
+	LibISDB::MMTAnalyzerFilter::SatelliteDeliverySystemList SatelliteList;
+	if (pAnalyzer->GetSatelliteDeliverySystemList(&SatelliteList)) {
+		tvis.hParent = TVI_ROOT;
+		tvis.hInsertAfter = TVI_LAST;
+		tvis.item.mask = TVIF_STATE | TVIF_TEXT | TVIF_CHILDREN;
+		tvis.item.state = 0;
+		tvis.item.stateMask = ~0U;
+		tvis.item.pszText = const_cast<LPTSTR>(TEXT("衛星分配システム"));
+		tvis.item.cChildren = !SatelliteList.empty() ? 1 : 0;
+		hItem = TreeView_InsertItem(hwndTree, &tvis);
+		if (hItem != nullptr) {
+			for (size_t i = 0; i < SatelliteList.size(); i++) {
+				const LibISDB::MMTAnalyzerFilter::SatelliteDeliverySystemInfo &Info = SatelliteList[i];
+
+				StringFormat(
+					szText,
+					TEXT("TLV{0} : TLV stream ID {1:#04x} ({1}) / 周波数 {2}.{3:05} GHz / {4}"),
+					i + 1,
+					Info.TLVStreamID,
+					Info.Frequency / 100000,
+					Info.Frequency % 100000,
+					GetPolarizationText(Info.Polarization));
+				tvis.hParent = hItem;
+				tvis.item.state = 0;
+				tvis.item.cChildren = 0;
+				tvis.item.pszText = szText;
+				TreeView_InsertItem(hwndTree, &tvis);
 			}
 		}
 	}
@@ -793,7 +1217,7 @@ public:
 		COLUMN_OUTPUT_COUNT,
 		COLUMN_DROPPED_COUNT,
 		COLUMN_ERROR_COUNT,
-		//COLUMN_SCRAMBLED_COUNT,
+		COLUMN_SCRAMBLED_COUNT,
 		COLUMN_DESCRIPTION,
 		NUM_COLUMNS
 	};
@@ -807,22 +1231,31 @@ public:
 	void SetColumnWidth(int Column, int Width) { m_ColumnWidth[Column] = Width; }
 
 private:
-	INT_PTR DlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) override;
-
-	void UpdateInfo();
-	String GetListText();
-	void SortItems(int Column, bool fDescending);
-
-	static int CALLBACK ItemCompare(LPARAM lParam1, LPARAM lParam2, LPARAM lParamSort);
-
 	typedef LibISDB::TSPacketParserFilter::PacketCountInfo PacketCountInfo;
 
 	struct PIDInfo
 	{
-		std::uint16_t PID;
+		std::uint32_t ID = 0; // TS は PID、TLV は packet_id か ID_TLV_*
 		PacketCountInfo Count;
+		bool fInputOnly = false;
 		String Description;
 	};
+
+	INT_PTR DlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) override;
+
+	void UpdateInfo();
+	void SetStreamFormat(bool fTLV);
+	String GetListText();
+	void SortItems(int Column, bool fDescending);
+
+	static void GetTSPIDInfoList(const LibISDB::StreamPacketParserFilter *pParser, std::vector<PIDInfo> *pList);
+	static void GetTLVPIDInfoList(const LibISDB::StreamPacketParserFilter *pParser, std::vector<PIDInfo> *pList);
+	static int CALLBACK ItemCompare(LPARAM lParam1, LPARAM lParam2, LPARAM lParamSort);
+
+	// packet_id の無い TLV パケットは packet_id の行の後に並べる
+	static constexpr std::uint32_t ID_TLV_SI   = 0x10000;
+	static constexpr std::uint32_t ID_TLV_NTP  = 0x10001;
+	static constexpr std::uint32_t ID_TLV_NULL = 0x10002;
 
 	struct SortParams
 	{
@@ -845,6 +1278,7 @@ private:
 	int m_ColumnWidth[NUM_COLUMNS];
 	int m_SortColumn = COLUMN_PID;
 	bool m_fSortDescending = false;
+	bool m_fTLV = false;
 	std::vector<PIDInfo> m_PIDInfoList;
 };
 
@@ -855,9 +1289,61 @@ const CPIDInfoPage::ColumnInfo CPIDInfoPage::m_ColumnList[NUM_COLUMNS] = {
 	{TEXT("出力"),     TEXT("Output"),      9, LVCFMT_RIGHT},
 	{TEXT("ドロップ"), TEXT("Dropped"),     9, LVCFMT_RIGHT},
 	{TEXT("エラー"),   TEXT("Error"),       9, LVCFMT_RIGHT},
-	//{TEXT("暗号化"),   TEXT("Scrambled"),   9, LVCFMT_RIGHT},
+	{TEXT("暗号化"),   TEXT("Scrambled"),   9, LVCFMT_RIGHT},
 	{TEXT("内容"),     TEXT("Description"), 0, LVCFMT_LEFT},
 };
+
+
+static LPCTSTR GetPredefinedMMTPacketIDText(std::uint16_t PacketID)
+{
+	switch (PacketID) {
+	case LibISDB::MMT_PACKET_ID_PA:      return TEXT("PLT");
+	case LibISDB::MMT_PACKET_ID_CA:      return TEXT("MH-CAT");
+	case LibISDB::MMT_PACKET_ID_AL_FEC:  return TEXT("AL-FEC");
+	case LibISDB::MMT_PACKET_ID_MH_EIT:  return TEXT("MH-EIT");
+	case LibISDB::MMT_PACKET_ID_MH_AIT:  return TEXT("MH-AIT");
+	case LibISDB::MMT_PACKET_ID_MH_BIT:  return TEXT("MH-BIT");
+	case LibISDB::MMT_PACKET_ID_MH_SDTT: return TEXT("MH-SDTT");
+	case LibISDB::MMT_PACKET_ID_MH_SDT:  return TEXT("MH-SDT");
+	case LibISDB::MMT_PACKET_ID_MH_TOT:  return TEXT("MH-TOT");
+	case LibISDB::MMT_PACKET_ID_MH_CDT:  return TEXT("MH-CDT");
+	case LibISDB::MMT_PACKET_ID_DATA:    return TEXT("データ伝送");
+	case LibISDB::MMT_PACKET_ID_MH_DIT:  return TEXT("MH-DIT");
+	case LibISDB::MMT_PACKET_ID_MH_SIT:  return TEXT("MH-SIT");
+	}
+
+	return nullptr;
+}
+
+
+static LPCTSTR GetMMTAssetText(const LibISDB::MMTAnalyzerFilter::AssetInfo &Asset, TCHAR (&szAssetType)[5])
+{
+	switch (Asset.AssetType) {
+	case LibISDB::MMT_ASSET_TYPE_HEV1:
+	case LibISDB::MMT_ASSET_TYPE_HVC1:
+		return LibISDB::GetStreamTypeText(LibISDB::STREAM_TYPE_H265);
+
+	case LibISDB::MMT_ASSET_TYPE_MP4A:
+		if (Asset.StreamType != LibISDB::STREAM_TYPE_INVALID) {
+			const LPCTSTR pszText = LibISDB::GetStreamTypeText(Asset.StreamType);
+			if (pszText != nullptr)
+				return pszText;
+		}
+		break;
+
+	case LibISDB::MMT_ASSET_TYPE_STPP:
+		if ((Asset.ComponentTag >= LibISDB::MMT_COMPONENT_TAG_SUPERIMPOSE_FIRST)
+				&& (Asset.ComponentTag <= LibISDB::MMT_COMPONENT_TAG_SUPERIMPOSE_LAST))
+			return TEXT("文字スーパー");
+		return TEXT("字幕");
+
+	case LibISDB::MMT_ASSET_TYPE_AAPP:
+		return TEXT("データ");
+	}
+
+	GetMMTAssetTypeText(Asset.AssetType, szAssetType);
+	return szAssetType;
+}
 
 
 CPIDInfoPage::CPIDInfoPage()
@@ -904,6 +1390,9 @@ INT_PTR CPIDInfoPage::DlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam
 				ListView_InsertColumn(hwndList, i, &lvc);
 			}
 
+			// 列は TS の名前で作ったので、形式は判定し直す
+			m_fTLV = false;
+			m_PIDInfoList.clear();
 			UpdateInfo();
 
 			for (int i = 0; i < NUM_COLUMNS; i++) {
@@ -976,26 +1465,26 @@ INT_PTR CPIDInfoPage::DlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam
 
 void CPIDInfoPage::UpdateInfo()
 {
-	const CAppMain &App = GetAppClass();
-	const LibISDB::TSPacketParserFilter *pParser =
-		App.CoreEngine.GetFilter<LibISDB::TSPacketParserFilter>();
-	const LibISDB::AnalyzerFilter *pAnalyzer =
-		App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+	const LibISDB::StreamPacketParserFilter *pParser =
+		GetAppClass().CoreEngine.GetFilter<LibISDB::StreamPacketParserFilter>();
 	if (pParser == nullptr)
 		return;
 
-	LibISDB::AnalyzerFilter::ServiceList ServiceList;
-	LibISDB::AnalyzerFilter::EMMPIDList EMMPIDList;
-	if (pAnalyzer != nullptr) {
-		pAnalyzer->GetServiceList(&ServiceList);
-		pAnalyzer->GetEMMPIDList(&EMMPIDList);
-	}
+	// 形式の判別中は直前の形式のまま表示する
+	const LibISDB::StreamFormat Format = pParser->GetStreamFormat();
+	if (Format != LibISDB::StreamFormat::Unknown)
+		SetStreamFormat(Format == LibISDB::StreamFormat::TLV);
+
+	std::vector<PIDInfo> PIDInfoList;
+	if (m_fTLV)
+		GetTLVPIDInfoList(pParser, &PIDInfoList);
+	else
+		GetTSPIDInfoList(pParser, &PIDInfoList);
 
 	const HWND hwndList = ::GetDlgItem(m_hDlg, IDC_PIDINFO_LIST);
 	const int ItemCount = ListView_GetItemCount(hwndList);
 
-	BYTE ItemState[LibISDB::PID_MAX + 1];
-	::ZeroMemory(ItemState, sizeof(ItemState));
+	std::map<std::uint32_t, UINT> ItemState;
 
 	LVITEM lvi;
 	lvi.mask = LVIF_PARAM | LVIF_STATE;
@@ -1004,58 +1493,113 @@ void CPIDInfoPage::UpdateInfo()
 	for (int i = 0; i < ItemCount; i++) {
 		lvi.iItem = i;
 		ListView_GetItem(hwndList, &lvi);
-		ItemState[m_PIDInfoList[lvi.lParam].PID] = static_cast<BYTE>(lvi.state);
+		if (lvi.state != 0)
+			ItemState.emplace(m_PIDInfoList[lvi.lParam].ID, lvi.state);
 	}
 
 	::SendMessage(hwndList, WM_SETREDRAW, FALSE, 0);
 
-	int PIDCount = 0;
+	const int PIDCount = static_cast<int>(PIDInfoList.size());
+
+	for (int i = 0; i < PIDCount; i++) {
+		const PIDInfo &Info = PIDInfoList[i];
+		TCHAR szText[32];
+
+		if (Info.ID <= 0xFFFF)
+			StringFormat(szText, TEXT("{:04x}"), Info.ID);
+		else
+			StringCopy(szText, TEXT("-"));
+
+		LVITEM lvi;
+
+		lvi.mask = LVIF_TEXT | LVIF_PARAM | LVIF_STATE;
+		lvi.iItem = i;
+		lvi.iSubItem = COLUMN_PID;
+		lvi.pszText = szText;
+		lvi.lParam = i;
+		const auto it = ItemState.find(Info.ID);
+		lvi.state = (it != ItemState.end()) ? it->second : 0;
+		lvi.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+
+		if (i >= ItemCount)
+			ListView_InsertItem(hwndList, &lvi);
+		else
+			ListView_SetItem(hwndList, &lvi);
+
+		StringFormat(szText, TEXT("{}"), Info.Count.Input);
+		ListView_SetItemText(hwndList, i, COLUMN_INPUT_COUNT, szText);
+
+		if (Info.fInputOnly) {
+			StringCopy(szText, TEXT("-"));
+			for (int Column = COLUMN_OUTPUT_COUNT; Column <= COLUMN_SCRAMBLED_COUNT; Column++)
+				ListView_SetItemText(hwndList, i, Column, szText);
+		} else {
+			StringFormat(szText, TEXT("{}"), Info.Count.Output);
+			ListView_SetItemText(hwndList, i, COLUMN_OUTPUT_COUNT, szText);
+
+			StringFormat(szText, TEXT("{}"), Info.Count.ContinuityError);
+			ListView_SetItemText(hwndList, i, COLUMN_DROPPED_COUNT, szText);
+
+			StringFormat(szText, TEXT("{}"), Info.Count.FormatError + Info.Count.TransportError);
+			ListView_SetItemText(hwndList, i, COLUMN_ERROR_COUNT, szText);
+
+			StringFormat(szText, TEXT("{}"), Info.Count.Scrambled);
+			ListView_SetItemText(hwndList, i, COLUMN_SCRAMBLED_COUNT, szText);
+		}
+
+		ListView_SetItemText(hwndList, i, COLUMN_DESCRIPTION, const_cast<LPTSTR>(Info.Description.c_str()));
+	}
+
+	m_PIDInfoList = std::move(PIDInfoList);
+
+	for (int i = ItemCount - 1; i >= PIDCount; i--)
+		ListView_DeleteItem(hwndList, i);
+
+	SortItems(m_SortColumn, m_fSortDescending);
+
+	::SendMessage(hwndList, WM_SETREDRAW, TRUE, 0);
+	::RedrawWindow(hwndList, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW);
+}
+
+
+void CPIDInfoPage::SetStreamFormat(bool fTLV)
+{
+	if (m_fTLV == fTLV)
+		return;
+
+	m_fTLV = fTLV;
+
+	const HWND hwndList = ::GetDlgItem(m_hDlg, IDC_PIDINFO_LIST);
+
+	ListView_DeleteAllItems(hwndList);
+	m_PIDInfoList.clear();
+
+	LVCOLUMN lvc;
+	lvc.mask = LVCF_TEXT;
+	lvc.pszText = const_cast<LPTSTR>(fTLV ? TEXT("packet_id") : m_ColumnList[COLUMN_PID].pszText);
+	ListView_SetColumn(hwndList, COLUMN_PID, &lvc);
+}
+
+
+void CPIDInfoPage::GetTSPIDInfoList(const LibISDB::StreamPacketParserFilter *pParser, std::vector<PIDInfo> *pList)
+{
+	const LibISDB::AnalyzerFilter *pAnalyzer =
+		GetAppClass().CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+
+	LibISDB::AnalyzerFilter::ServiceList ServiceList;
+	LibISDB::AnalyzerFilter::EMMPIDList EMMPIDList;
+	if (pAnalyzer != nullptr) {
+		pAnalyzer->GetServiceList(&ServiceList);
+		pAnalyzer->GetEMMPIDList(&EMMPIDList);
+	}
 
 	for (std::uint16_t PID = 0; PID <= LibISDB::PID_MAX; PID++) {
 		const PacketCountInfo PacketCount = pParser->GetPacketCount(PID);
 
 		if (PacketCount.Input > 0) {
-			if (m_PIDInfoList.size() <= static_cast<size_t>(PIDCount))
-				m_PIDInfoList.emplace_back();
-			PIDInfo &Info = m_PIDInfoList[PIDCount];
-			Info.PID = PID;
+			PIDInfo &Info = pList->emplace_back();
+			Info.ID = PID;
 			Info.Count = PacketCount;
-
-			TCHAR szText[32];
-
-			StringFormat(szText, TEXT("{:04x}"), PID);
-
-			LVITEM lvi;
-
-			lvi.mask = LVIF_TEXT | LVIF_PARAM | LVIF_STATE;
-			lvi.iItem = PIDCount;
-			lvi.iSubItem = COLUMN_PID;
-			lvi.pszText = szText;
-			lvi.lParam = PIDCount;
-			lvi.state = ItemState[PID];
-			lvi.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
-
-			if (PIDCount >= ItemCount)
-				ListView_InsertItem(hwndList, &lvi);
-			else
-				ListView_SetItem(hwndList, &lvi);
-
-			StringFormat(szText, TEXT("{}"), PacketCount.Input);
-			ListView_SetItemText(hwndList, PIDCount, COLUMN_INPUT_COUNT, szText);
-
-			StringFormat(szText, TEXT("{}"), PacketCount.Output);
-			ListView_SetItemText(hwndList, PIDCount, COLUMN_OUTPUT_COUNT, szText);
-
-			StringFormat(szText, TEXT("{}"), PacketCount.ContinuityError);
-			ListView_SetItemText(hwndList, PIDCount, COLUMN_DROPPED_COUNT, szText);
-
-			StringFormat(szText, TEXT("{}"), PacketCount.FormatError + PacketCount.TransportError);
-			ListView_SetItemText(hwndList, PIDCount, COLUMN_ERROR_COUNT, szText);
-
-			//StringFormat(szText, TEXT("{}"), PacketCount.Scrambled);
-			//ListView_SetItemText(hwndList, PIDCount, COLUMN_SCRAMBLED_COUNT, szText);
-
-			Info.Description.clear();
 
 			const LibISDB::CharType *pText = LibISDB::GetPredefinedPIDText(PID);
 			if (pText != nullptr)
@@ -1115,23 +1659,103 @@ void CPIDInfoPage::UpdateInfo()
 					}
 				}
 			}
+		}
+	}
+}
 
-			ListView_SetItemText(hwndList, PIDCount, COLUMN_DESCRIPTION, const_cast<LPTSTR>(Info.Description.c_str()));
 
-			PIDCount++;
+void CPIDInfoPage::GetTLVPIDInfoList(const LibISDB::StreamPacketParserFilter *pParser, std::vector<PIDInfo> *pList)
+{
+	const LibISDB::MMTAnalyzerFilter *pAnalyzer =
+		GetAppClass().CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+
+	LibISDB::MMTAnalyzerFilter::ServiceList ServiceList;
+	LibISDB::MMTAnalyzerFilter::EMMPacketIDList EMMPacketIDList;
+	if (pAnalyzer != nullptr) {
+		pAnalyzer->GetServiceList(&ServiceList);
+		pAnalyzer->GetEMMPacketIDList(&EMMPacketIDList);
+	}
+
+	LibISDB::StreamPacketParserFilter::MMTPacketCountList PacketCountList;
+	pParser->GetMMTPacketCountList(&PacketCountList);
+
+	for (const auto &PacketCount : PacketCountList) {
+		const std::uint16_t PacketID = PacketCount.PacketID;
+		PIDInfo &Info = pList->emplace_back();
+		Info.ID = PacketID;
+		Info.Count = PacketCount.Count;
+
+		const auto AppendText = [&Info](LPCTSTR pszServiceText, LPCTSTR pszText) {
+			if (!Info.Description.empty())
+				Info.Description += TEXT(' ');
+			Info.Description += pszServiceText;
+			Info.Description += TEXT(' ');
+			Info.Description += pszText;
+		};
+
+		const LPCTSTR pText = GetPredefinedMMTPacketIDText(PacketID);
+		if (pText != nullptr)
+			Info.Description += pText;
+
+		if (std::ranges::find(EMMPacketIDList, PacketID) != EMMPacketIDList.end())
+			Info.Description += TEXT("EMM");
+
+		for (const auto &Service : ServiceList) {
+			TCHAR ServiceText[8];
+			StringFormat(ServiceText, TEXT("[{:04x}]"), Service.ServiceID);
+
+			if (Service.MPTPacketID == PacketID)
+				AppendText(ServiceText, TEXT("MPT"));
+
+			for (const auto &ECM : Service.ECMList) {
+				if (ECM.PacketID == PacketID) {
+					AppendText(ServiceText, TEXT("ECM"));
+					break;
+				}
+			}
+
+			for (const auto &App : Service.ApplicationServiceList) {
+				if (App.AITPacketID == PacketID)
+					AppendText(ServiceText, TEXT("MH-AIT"));
+				if (App.DTMessagePacketID == PacketID)
+					AppendText(ServiceText, TEXT("データ伝送"));
+				for (const auto &EMT : App.EMTList) {
+					if (EMT.PacketID == PacketID) {
+						AppendText(ServiceText, TEXT("EMT"));
+						break;
+					}
+				}
+			}
+
+			for (const auto &Asset : Service.AssetList) {
+				if (Asset.PacketID == PacketID) {
+					TCHAR szAssetType[5];
+					AppendText(ServiceText, GetMMTAssetText(Asset, szAssetType));
+				}
+			}
 		}
 	}
 
-	if (m_PIDInfoList.size() > static_cast<size_t>(PIDCount))
-		m_PIDInfoList.resize(PIDCount);
+	const LibISDB::StreamPacketParserFilter::TLVPacketCountInfo TLVPacketCount = pParser->GetTLVPacketCount();
+	const struct {
+		std::uint32_t ID;
+		unsigned long long Count;
+		LPCTSTR pszText;
+	} TLVPacketList[] = {
+		{ID_TLV_SI,   TLVPacketCount.Signaling, TEXT("TLV-SI")},
+		{ID_TLV_NTP,  TLVPacketCount.NTP,       TEXT("NTP")},
+		{ID_TLV_NULL, TLVPacketCount.Null,      TEXT("Null")},
+	};
 
-	for (int i = ItemCount - 1; i >= PIDCount; i--)
-		ListView_DeleteItem(hwndList, i);
-
-	SortItems(m_SortColumn, m_fSortDescending);
-
-	::SendMessage(hwndList, WM_SETREDRAW, TRUE, 0);
-	::RedrawWindow(hwndList, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW);
+	for (const auto &e : TLVPacketList) {
+		if (e.Count > 0) {
+			PIDInfo &Info = pList->emplace_back();
+			Info.ID = e.ID;
+			Info.Count.Input = e.Count;
+			Info.fInputOnly = true;
+			Info.Description = e.pszText;
+		}
+	}
 }
 
 
@@ -1143,12 +1767,14 @@ String CPIDInfoPage::GetListText()
 	String Text;
 
 	for (int i = 0; i < NUM_COLUMNS; i++) {
-		const int Length = static_cast<int>(StringLength(m_ColumnList[i].pszFormatText));
+		const LPCTSTR pszColumnText =
+			(m_fTLV && (i == COLUMN_PID)) ? TEXT("packet_id") : m_ColumnList[i].pszFormatText;
+		const int Length = static_cast<int>(StringLength(pszColumnText));
 		ColumnDigits[i] = std::max(Length, m_ColumnList[i].Digits);
 		const int Filler = ColumnDigits[i] - Length;
 		if (m_ColumnList[i].Format == LVCFMT_RIGHT)
 			Text.append(Filler, TEXT(' '));
-		Text += m_ColumnList[i].pszFormatText;
+		Text += pszColumnText;
 		if (i < NUM_COLUMNS - 1) {
 			if (m_ColumnList[i].Format == LVCFMT_LEFT)
 				Text.append(Filler, TEXT(' '));
@@ -1206,7 +1832,7 @@ int CALLBACK CPIDInfoPage::ItemCompare(LPARAM lParam1, LPARAM lParam2, LPARAM lP
 
 	switch (pParams->Column) {
 	case COLUMN_PID:
-		Cmp = CompareValue(Info1.PID, Info2.PID);
+		Cmp = CompareValue(Info1.ID, Info2.ID);
 		break;
 
 	case COLUMN_INPUT_COUNT:
@@ -1227,11 +1853,9 @@ int CALLBACK CPIDInfoPage::ItemCompare(LPARAM lParam1, LPARAM lParam2, LPARAM lP
 			Info2.Count.FormatError + Info2.Count.TransportError);
 		break;
 
-	/*
 	case COLUMN_SCRAMBLED_COUNT:
 		Cmp = CompareValue(Info1.Count.Scrambled, Info2.Count.Scrambled);
 		break;
-	*/
 
 	case COLUMN_DESCRIPTION:
 		if (Info1.Description.empty()) {
@@ -1248,7 +1872,7 @@ int CALLBACK CPIDInfoPage::ItemCompare(LPARAM lParam1, LPARAM lParam2, LPARAM lP
 	}
 
 	if (Cmp == 0)
-		Cmp = CompareValue(Info1.PID, Info2.PID);
+		Cmp = CompareValue(Info1.ID, Info2.ID);
 
 	return pParams->fDescending ? -Cmp : Cmp;
 }

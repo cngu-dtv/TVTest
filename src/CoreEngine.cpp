@@ -56,11 +56,15 @@ void CCoreEngine::CreateFilters()
 	LibISDB::BonDriverSourceFilter *pSourceFilter = new LibISDB::BonDriverSourceFilter;
 	RegisterFilter(pSourceFilter);
 
-	LibISDB::TSPacketParserFilter *pPacketParser = new LibISDB::TSPacketParserFilter;
+	// TS と TLV を自動判別する
+	LibISDB::StreamPacketParserFilter *pPacketParser = new LibISDB::StreamPacketParserFilter;
 	RegisterFilter(pPacketParser);
 
 	LibISDB::AnalyzerFilter *pAnalyzer = new LibISDB::AnalyzerFilter;
 	RegisterFilter(pAnalyzer);
+
+	LibISDB::MMTAnalyzerFilter *pMMTAnalyzer = new LibISDB::MMTAnalyzerFilter;
+	RegisterFilter(pMMTAnalyzer);
 
 	LibISDB::TeeFilter *pTee = new LibISDB::TeeFilter;
 	RegisterFilter(pTee);
@@ -100,9 +104,10 @@ bool CCoreEngine::BuildEngine()
 
 	FilterID = m_FilterGraph.GetFilterID<LibISDB::BonDriverSourceFilter>();
 	ConnectTSProcessor(&ConnectionList, TSProcessorConnectPosition::Source, &FilterID);
-	ConnectFilter(&ConnectionList, m_FilterGraph.GetFilterID<LibISDB::TSPacketParserFilter>(), &FilterID);
+	ConnectFilter(&ConnectionList, m_FilterGraph.GetFilterID<LibISDB::StreamPacketParserFilter>(), &FilterID);
 	ConnectTSProcessor(&ConnectionList, TSProcessorConnectPosition::Preprocessing, &FilterID);
 	ConnectFilter(&ConnectionList, m_FilterGraph.GetFilterID<LibISDB::AnalyzerFilter>(), &FilterID);
+	ConnectFilter(&ConnectionList, m_FilterGraph.GetFilterID<LibISDB::MMTAnalyzerFilter>(), &FilterID);
 	ConnectTSProcessor(&ConnectionList, TSProcessorConnectPosition::Postprocessing, &FilterID);
 	ConnectFilter(&ConnectionList, m_FilterGraph.GetFilterID<LibISDB::TeeFilter>(), &FilterID);
 	const LibISDB::FilterGraph::IDType TeeFilterID = FilterID;
@@ -610,7 +615,18 @@ CCoreEngine::StatusFlag CCoreEngine::UpdateAsyncStatus()
 		TRACE(TEXT("Audio streams = {}ch\n"), NumAudioStreams);
 	}
 
-	if (m_pAnalyzer != nullptr) {
+	if (IsMMTStream()) {
+		// MPT の MH-音声コンポーネント記述子
+		LibISDB::EventInfo::AudioInfo AudioInfo;
+		const BYTE AudioComponentType =
+			GetAudioComponentInfo(m_CurAudioStream, &AudioInfo) ?
+				AudioInfo.ComponentType : LibISDB::COMPONENT_TYPE_INVALID;
+		if (AudioComponentType != m_AudioComponentType) {
+			m_AudioComponentType = AudioComponentType;
+			Updated |= StatusFlag::AudioComponentType;
+			TRACE(TEXT("AudioComponentType = {:x}\n"), AudioComponentType);
+		}
+	} else if (m_pAnalyzer != nullptr) {
 		const BYTE AudioComponentType = m_pAnalyzer->GetAudioComponentType(
 			m_pAnalyzer->GetServiceIndexByID(m_CurServiceID), m_CurAudioStream);
 		if (AudioComponentType != m_AudioComponentType) {
@@ -750,7 +766,7 @@ int CCoreEngine::GetPacketBufferUsedPercentage() const
 
 bool CCoreEngine::GetCurrentEventInfo(LibISDB::EventInfo *pInfo, uint16_t ServiceID, bool fNext)
 {
-	if (pInfo == nullptr || m_pAnalyzer == nullptr)
+	if (pInfo == nullptr)
 		return false;
 
 	if (ServiceID == LibISDB::SERVICE_ID_INVALID) {
@@ -758,6 +774,17 @@ bool CCoreEngine::GetCurrentEventInfo(LibISDB::EventInfo *pInfo, uint16_t Servic
 			return false;
 		ServiceID = m_CurServiceID;
 	}
+
+	if (IsMMTStream()) {
+		const int ServiceIndex = m_pMMTAnalyzer->GetServiceIndexByID(ServiceID);
+		if (ServiceIndex < 0)
+			return false;
+
+		return m_pMMTAnalyzer->GetEventInfo(ServiceIndex, pInfo, fNext);
+	}
+
+	if (m_pAnalyzer == nullptr)
+		return false;
 
 	const int ServiceIndex = m_pAnalyzer->GetServiceIndexByID(ServiceID);
 	if (ServiceIndex < 0)
@@ -816,7 +843,14 @@ void CCoreEngine::OnServiceChanged(uint16_t ServiceID)
 
 void CCoreEngine::OnEventChanged(uint16_t EventID)
 {
-	m_EventListenerList.CallEventListener(&CCoreEngine::EventListener::OnEventChanged, m_pAnalyzer, EventID);
+	if (IsMMTStream())
+		m_EventListenerList.CallEventListener(
+			static_cast<void (CCoreEngine::EventListener::*)(LibISDB::MMTAnalyzerFilter *, uint16_t)>(&CCoreEngine::EventListener::OnEventChanged),
+			m_pMMTAnalyzer, EventID);
+	else
+		m_EventListenerList.CallEventListener(
+			static_cast<void (CCoreEngine::EventListener::*)(LibISDB::AnalyzerFilter *, uint16_t)>(&CCoreEngine::EventListener::OnEventChanged),
+			m_pAnalyzer, EventID);
 }
 
 
@@ -858,6 +892,52 @@ void CCoreEngine::OnEITUpdated(LibISDB::AnalyzerFilter *pAnalyzer)
 void CCoreEngine::OnTOTUpdated(LibISDB::AnalyzerFilter *pAnalyzer)
 {
 	m_EventListenerList.CallEventListener(&CCoreEngine::EventListener::OnTOTUpdated, pAnalyzer);
+}
+
+
+void CCoreEngine::OnPLTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer)
+{
+	bool fStarted;
+	uint16_t OldTSID;
+	{
+		LibISDB::BlockLock Lock(m_EngineLock);
+		fStarted = m_IsMMTStreamStarted;
+		OldTSID = m_CurTransportStreamID;
+	}
+	ViewerEngine::OnPLTUpdated(pAnalyzer);
+	// TSEngine::UpdateService と同じく、最初の PLT と tlv_stream_id の変化をストリームの変化とする
+	// (最初の PLT の時点では tlv_stream_id が分からないことがある)
+	const bool fStreamChanged =
+		!fStarted
+		|| ((OldTSID != LibISDB::TRANSPORT_STREAM_ID_INVALID) && (OldTSID != m_CurTransportStreamID));
+	m_EventListenerList.CallEventListener(&CCoreEngine::EventListener::OnPLTUpdated, pAnalyzer, fStreamChanged);
+}
+
+
+void CCoreEngine::OnMPTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer, uint16_t ServiceID)
+{
+	ViewerEngine::OnMPTUpdated(pAnalyzer, ServiceID);
+	m_EventListenerList.CallEventListener(&CCoreEngine::EventListener::OnMPTUpdated, pAnalyzer, ServiceID);
+}
+
+
+void CCoreEngine::OnMHSDTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer)
+{
+	ViewerEngine::OnMHSDTUpdated(pAnalyzer);
+	m_EventListenerList.CallEventListener(&CCoreEngine::EventListener::OnMHSDTUpdated, pAnalyzer);
+}
+
+
+void CCoreEngine::OnMHEITUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer)
+{
+	ViewerEngine::OnMHEITUpdated(pAnalyzer);
+	m_EventListenerList.CallEventListener(&CCoreEngine::EventListener::OnMHEITUpdated, pAnalyzer);
+}
+
+
+void CCoreEngine::OnMHTOTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer)
+{
+	m_EventListenerList.CallEventListener(&CCoreEngine::EventListener::OnMHTOTUpdated, pAnalyzer);
 }
 
 

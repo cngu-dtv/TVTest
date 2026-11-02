@@ -731,7 +731,7 @@ bool CRecordManager::RecordDialog(HWND hwndOwner)
 
 bool CRecordManager::GenerateFilePath(
 	const FileNameFormatInfo &FormatInfo, LPCWSTR pszFormat,
-	String *pFilePath) const
+	String *pFilePath, bool fMMTSExtension) const
 {
 	if (pFilePath == nullptr)
 		return false;
@@ -759,6 +759,12 @@ bool CRecordManager::GenerateFilePath(
 				&FileName)
 			|| FileName.empty())
 		return false;
+
+	if (fMMTSExtension) {
+		const LPCWSTR pszExtension = ::PathFindExtensionW(FileName.c_str());
+		if (::lstrcmpiW(pszExtension, L".ts") == 0)
+			FileName.replace(pszExtension - FileName.c_str(), String::npos, L".mmts");
+	}
 
 	if (!::PathIsRelativeW(FileName.c_str())) {
 		if (!MakeUniqueFileName(&FileName))
@@ -1070,7 +1076,9 @@ INT_PTR CRecordManager::CRecordSettingsDialog::DlgProc(HWND hDlg, UINT uMsg, WPA
 				InitOpenFileName(&ofn);
 				ofn.hwndOwner = hDlg;
 				ofn.lpstrFilter =
-					TEXT("TSファイル(*.ts)\0*.ts\0すべてのファイル\0*.*\0");
+					TEXT("TSファイル(*.ts)\0*.ts\0")
+					TEXT("MMT/TLVファイル(*.mmts;*.tlv)\0*.mmts;*.tlv\0")
+					TEXT("すべてのファイル\0*.*\0");
 				ofn.lpstrFile = szFileName;
 				ofn.nMaxFile = MAX_PATH;
 				ofn.lpstrTitle = TEXT("保存ファイル名");

@@ -2282,6 +2282,8 @@ enum {
 /**
 @brief 現在のチャンネルの情報を取得する
 
+MMT (高度 BS/CS) のストリームには TS 名が無いので、 ChannelInfo::szTransportStreamName は空になります。
+
 @param[in] pParam プラグインパラメータ
 @param[in,out] pInfo 情報を取得する ChannelInfo 構造体へのポインタ。
                事前に ChannelInfo::Size メンバを設定して呼び出します。
@@ -2441,6 +2443,8 @@ inline bool MsgGetChannelInfo(PluginParam *pParam, int Space, int Index, Channel
 
 /**
 @brief サービスの情報
+
+MMT (高度 BS/CS) のストリームでは、PID の欄にアセットの packet_id が入ります。
 
 @sa ServiceInfo2
 */
@@ -3423,7 +3427,11 @@ inline bool MsgClose(PluginParam *pParam, CloseFlag Flags = CLOSE_NONE)
 @brief ストリームコールバック関数
 
 pData は 188 バイトの TS パケットが渡されます。
+TLV (高度 BS/CS) のストリームでは、TS パケットの代わりに TLV パケットが 1 つずつ渡されます。
+TLV パケットは先頭のバイトが 0x7F で、大きさはヘッダの長さ (pData[2] と pData[3]) に 4 を足したものです。
+188 バイトより短い TLV パケットでも、pData から 188 バイトまでは読み書きできます。
 FALSE を返すとパケットが破棄されます。
+パケットを書き換える場合、TLV パケットの長さは変えないでください。
 */
 typedef BOOL (CALLBACK *StreamCallbackFunc)(BYTE *pData, void *pClientData);
 
@@ -3450,7 +3458,7 @@ struct StreamCallbackInfo
 /**
 @brief ストリームコールバックを設定する
 
-ストリームコールバックを登録すると、TS データを受け取ることができます。
+ストリームコールバックを登録すると、TS (TLV のストリームでは TLV) のデータを受け取ることができます。
 コールバック関数は一つのプラグインで複数登録できます。
 ストリームコールバック関数で処理が遅延すると全体が遅延するので、
 時間が掛かる処理は別スレッドで行うなどしてください。
@@ -4236,7 +4244,7 @@ inline int MsgGetDriverFullPathName(PluginParam *pParam, LPWSTR pszPath, int Max
 @param[in] pParam プラグインパラメータ
 @param[in] NetworkID ネットワーク ID
 @param[in] ServiceID サービス ID
-@param[in] LogoType ロゴの種類。0 から 5 までで指定します。以下のサイズのロゴが取得されます。
+@param[in] LogoType ロゴの種類。0 から 7 までで指定します。以下のサイズのロゴが取得されます。
                     | LogoType | サイズ |
                     |----------|--------|
                     | 0        | 48x24  |
@@ -4245,7 +4253,10 @@ inline int MsgGetDriverFullPathName(PluginParam *pParam, LPWSTR pszPath, int Max
                     | 3        | 72x36  |
                     | 4        | 54x36  |
                     | 5        | 64x36  |
+                    | 6        | 128x72 |
+                    | 7        | 256x144|
                     いずれのロゴも16:9で表示すると本来の比率になります。
+                    6 と 7 は高度 BS/CS (MMT) のロゴです。
 
 @return ビットマップ(DIB セクション)のハンドル。
         画像が取得できない場合は nullptr。
@@ -4270,7 +4281,7 @@ inline HBITMAP MsgGetLogo(PluginParam *pParam, WORD NetworkID, WORD ServiceID, B
 @param[in] ServiceID サービス ID
 
 @return 利用可能なロゴを表すフラグ。
-        下位から 1 ビットごとに LogoType の 0 から 5 までを表し、ビットが 1 であればその種類のロゴが利用できます。
+        下位から 1 ビットごとに LogoType の 0 から 7 までを表し、ビットが 1 であればその種類のロゴが利用できます。
         LogoType については MsgGetLogo() を参照してください。
 
 @since ver.0.0.10
@@ -7692,6 +7703,15 @@ inline bool MsgSetWindowDarkMode(PluginParam *pParam, HWND hwnd, bool fDark)
 
 /**
 @brief Elementary Stream (ES) の情報
+
+MMT (高度 BS/CS) のストリームでは、アセットの情報が以下のように入ります。
+- PID : packet_id
+- HierarchicalReferencePID : 0xFFFF
+- StreamType : 映像は 0x24、音声は MH-音声コンポーネント記述子の stream_type、それ以外は 0xFF
+- ComponentTag : component_tag
+- QualityLevel : 0xFF
+
+字幕 (ES_MEDIA_CAPTION) は字幕と文字スーパーのアセット、データ放送 (ES_MEDIA_DATA_CARROUSEL) はアプリケーションのアセットです。
 */
 struct ElementaryStreamInfo
 {
@@ -7781,7 +7801,7 @@ inline bool MsgGetElementaryStreamInfoList(PluginParam *pParam, ElementaryStream
 @brief 全てのサービス数を取得
 
 現在のストリームのサービス数を取得します。
-この数は PAT に含まれる全てのサービスの数で、試聴できないサービスも含まれます。
+この数は PAT (MMT の場合は PLT) に含まれる全てのサービスの数で、試聴できないサービスも含まれます。
 試聴できるサービスの数を取得する場合は MsgGetService() を使用します。
 
 @param[in] pParam プラグインパラメータ
@@ -7819,6 +7839,9 @@ TVTEST_DEFINE_ENUM_FLAG_OPERATORS(ServiceInfo2Status)
 
 /**
 @brief サービス情報
+
+MMT (高度 BS/CS) のストリームでは、 ServiceInfo2::TransportStreamID に TLV ストリーム ID が、
+ServiceInfo2::PMT_PID に MPT の packet_id が入ります。 ServiceInfo2::PCR_PID は常に 0xFFFF です。
 
 @sa ServiceInfo
 */
@@ -8296,6 +8319,8 @@ public:
 
 	/**
 	@brief 現在のチャンネルの情報を取得する
+
+	MMT (高度 BS/CS) のストリームには TS 名が無いので、 ChannelInfo::szTransportStreamName は空になります。
 
 	@param[out] pInfo 情報を取得する ChannelInfo 構造体へのポインタ。
 
@@ -9110,7 +9135,7 @@ public:
 	/**
 	@brief ストリームコールバックを設定する
 
-	ストリームコールバックを登録すると、TS データを受け取ることができます。
+	ストリームコールバックを登録すると、TS (TLV のストリームでは TLV) のデータを受け取ることができます。
 	コールバック関数は一つのプラグインで複数登録できます。
 	ストリームコールバック関数で処理が遅延すると全体が遅延するので、
 	時間が掛かる処理は別スレッドで行うなどしてください。
@@ -9681,7 +9706,7 @@ public:
 
 	@param[in] NetworkID ネットワーク ID
 	@param[in] ServiceID サービス ID
-	@param[in] LogoType ロゴの種類。0 から 5 までで指定します。以下のサイズのロゴが取得されます。
+	@param[in] LogoType ロゴの種類。0 から 7 までで指定します。以下のサイズのロゴが取得されます。
 	                    | LogoType | サイズ |
 	                    |----------|--------|
 	                    | 0        | 48x24  |
@@ -9690,7 +9715,10 @@ public:
 	                    | 3        | 72x36  |
 	                    | 4        | 54x36  |
 	                    | 5        | 64x36  |
+	                    | 6        | 128x72 |
+	                    | 7        | 256x144|
 	                    いずれのロゴも16:9で表示すると本来の比率になります。
+	                    6 と 7 は高度 BS/CS (MMT) のロゴです。
 
 	@return ビットマップ(DIB セクション)のハンドル。
 	        画像が取得できない場合は nullptr。
@@ -9714,7 +9742,7 @@ public:
 	@param[in] ServiceID サービス ID
 
 	@return 利用可能なロゴを表すフラグ。
-	        下位から 1 ビットごとに LogoType の 0 から 5 までを表し、ビットが 1 であればその種類のロゴが利用できます。
+	        下位から 1 ビットごとに LogoType の 0 から 7 までを表し、ビットが 1 であればその種類のロゴが利用できます。
 	        LogoType については GetLogo() を参照してください。
 
 	@since ver.0.0.10
@@ -11574,7 +11602,7 @@ public:
 	@brief 全てのサービス数を取得
 
 	現在のストリームのサービス数を取得します。
-	この数は PAT に含まれる全てのサービスの数で、試聴できないサービスも含まれます。
+	この数は PAT (MMT の場合は PLT) に含まれる全てのサービスの数で、試聴できないサービスも含まれます。
 	試聴できるサービスの数を取得する場合は GetService() を使用します。
 
 	@return サービスの数

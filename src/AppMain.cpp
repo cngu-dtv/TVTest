@@ -946,6 +946,8 @@ int CAppMain::Main(HINSTANCE hInstance, LPCTSTR pszCmdLine, int nCmdShow)
 	CoreEngine.SetStreamTypePlayable(LibISDB::STREAM_TYPE_MPEG1_AUDIO, true);
 	CoreEngine.SetStreamTypePlayable(LibISDB::STREAM_TYPE_MPEG2_AUDIO, true);
 	CoreEngine.SetStreamTypePlayable(LibISDB::STREAM_TYPE_AAC, true);
+	// MMT の AAC (LATM)
+	CoreEngine.SetStreamTypePlayable(LibISDB::STREAM_TYPE_MPEG4_AUDIO, true);
 	CoreEngine.SetStreamTypePlayable(LibISDB::STREAM_TYPE_AC3, true);
 
 	if (CmdLineOptions.m_f1Seg || PlaybackOptions.Is1SegModeOnStartup())
@@ -1684,6 +1686,56 @@ void CAppMain::CEngineEventListener::OnSPDIFPassthroughError(LibISDB::ViewerFilt
 	m_App.MainWindow.PostMessage(WM_APP_SPDIFPASSTHROUGHERROR, hr, 0);
 }
 
+void CAppMain::CEngineEventListener::OnPLTUpdated(
+	LibISDB::MMTAnalyzerFilter *pAnalyzer, bool StreamChanged)
+{
+	OnServiceUpdated(pAnalyzer, true, StreamChanged);
+	if (m_App.AudioManager.OnServiceUpdated())
+		m_App.MainWindow.PostMessage(WM_APP_AUDIOLISTCHANGED, 0, 0);
+}
+
+void CAppMain::CEngineEventListener::OnMPTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer, uint16_t ServiceID)
+{
+	OnServiceInfoUpdated(pAnalyzer);
+}
+
+void CAppMain::CEngineEventListener::OnMHSDTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer)
+{
+	// サービスとロゴを関連付ける
+	LibISDB::MMTAnalyzerFilter::SDTServiceList ServiceList;
+	if (pAnalyzer->GetSDTServiceList(&ServiceList)) {
+		const uint16_t NetworkID = pAnalyzer->GetNetworkID();
+		for (auto const &e : ServiceList) {
+			if (e.LogoID != LibISDB::MMTAnalyzerFilter::LOGO_ID_INVALID)
+				m_App.LogoManager.AssociateLogoID(NetworkID, e.ServiceID, e.LogoID);
+		}
+	}
+
+	OnServiceInfoUpdated(pAnalyzer);
+}
+
+void CAppMain::CEngineEventListener::OnEventChanged(LibISDB::MMTAnalyzerFilter *pAnalyzer, uint16_t EventID)
+{
+	TRACE(TEXT("CEngineEventListener::OnEventChanged() : event_id {:#04x} (MMT)\n"), EventID);
+	if (EventID != LibISDB::EVENT_ID_INVALID) {
+		m_App.CoreEngine.SetAsyncStatusUpdatedFlag(CCoreEngine::StatusFlag::EventID);
+		if (m_App.AudioManager.OnEventUpdated())
+			m_App.MainWindow.PostMessage(WM_APP_AUDIOLISTCHANGED, 0, 0);
+	}
+}
+
+void CAppMain::CEngineEventListener::OnMHEITUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer)
+{
+	m_App.CoreEngine.SetAsyncStatusUpdatedFlag(CCoreEngine::StatusFlag::EventInfo);
+	if (m_App.AudioManager.OnEventUpdated())
+		m_App.MainWindow.PostMessage(WM_APP_AUDIOLISTCHANGED, 0, 0);
+}
+
+void CAppMain::CEngineEventListener::OnMHTOTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer)
+{
+	m_App.CoreEngine.SetAsyncStatusUpdatedFlag(CCoreEngine::StatusFlag::TOT);
+}
+
 void CAppMain::CEngineEventListener::OnServiceUpdated(
 	LibISDB::AnalyzerFilter *pAnalyzer, bool fListUpdated, bool fStreamChanged)
 {
@@ -1699,6 +1751,23 @@ void CAppMain::CEngineEventListener::OnServiceInfoUpdated(LibISDB::AnalyzerFilte
 	m_App.MainWindow.PostMessage(
 		WM_APP_SERVICEINFOUPDATED, 0,
 		MAKELPARAM(pAnalyzer->GetNetworkID(), pAnalyzer->GetTransportStreamID()));
+}
+
+void CAppMain::CEngineEventListener::OnServiceUpdated(
+	LibISDB::MMTAnalyzerFilter *pAnalyzer, bool fListUpdated, bool fStreamChanged)
+{
+	CServiceUpdateInfo *pInfo = new CServiceUpdateInfo(&m_App.CoreEngine, pAnalyzer);
+
+	pInfo->m_fStreamChanged = fStreamChanged;
+	m_App.MainWindow.PostMessage(WM_APP_SERVICEUPDATE, fListUpdated, reinterpret_cast<LPARAM>(pInfo));
+}
+
+void CAppMain::CEngineEventListener::OnServiceInfoUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer)
+{
+	OnServiceUpdated(pAnalyzer, false, false);
+	m_App.MainWindow.PostMessage(
+		WM_APP_SERVICEINFOUPDATED, 0,
+		MAKELPARAM(pAnalyzer->GetNetworkID(), pAnalyzer->GetTLVStreamID()));
 }
 
 

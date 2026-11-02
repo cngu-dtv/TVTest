@@ -722,7 +722,10 @@ bool CAppCore::SetServiceByID(WORD ServiceID, SetServiceFlag Flags)
 		m_App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
 	if (pAnalyzer == nullptr)
 		return false;
-	WORD NetworkID = pAnalyzer->GetNetworkID();
+	const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer =
+		m_App.CoreEngine.IsMMTStream() ?
+			m_App.CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>() : nullptr;
+	WORD NetworkID = pMMTAnalyzer != nullptr ? pMMTAnalyzer->GetNetworkID() : pAnalyzer->GetNetworkID();
 	if (NetworkID == LibISDB::NETWORK_ID_INVALID
 			&& pCurChInfo != nullptr && pCurChInfo->GetNetworkID() > 0)
 		NetworkID = pCurChInfo->GetNetworkID();
@@ -772,13 +775,21 @@ bool CAppCore::SetServiceByID(WORD ServiceID, SetServiceFlag Flags)
 		m_App.ChannelManager.SetCurrentServiceID(ServiceID);
 
 	if (ServiceID != LibISDB::SERVICE_ID_INVALID) {
-		const int ServiceIndex = pAnalyzer->GetServiceIndexByID(ServiceID);
-		if (ServiceIndex >= 0) {
-			//m_App.AddLog(TEXT("サービスを変更しました。(SID {})"), ServiceID);
-
+		if (pMMTAnalyzer != nullptr) {
+			// MMT にワンセグは無い
 			if (fStrict && m_f1SegMode
-					&& !pAnalyzer->Is1SegService(ServiceIndex)) {
+					&& pMMTAnalyzer->GetServiceIndexByID(ServiceID) >= 0) {
 				Set1SegMode(false, false);
+			}
+		} else {
+			const int ServiceIndex = pAnalyzer->GetServiceIndexByID(ServiceID);
+			if (ServiceIndex >= 0) {
+				//m_App.AddLog(TEXT("サービスを変更しました。(SID {})"), ServiceID);
+
+				if (fStrict && m_f1SegMode
+						&& !pAnalyzer->Is1SegService(ServiceIndex)) {
+					Set1SegMode(false, false);
+				}
 			}
 		}
 	}
@@ -824,13 +835,24 @@ bool CAppCore::GetCurrentStreamIDInfo(StreamIDInfo *pInfo) const
 	if (pInfo == nullptr)
 		return false;
 
-	const LibISDB::AnalyzerFilter *pAnalyzer =
-		m_App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
-	if (pAnalyzer == nullptr)
-		return false;
+	if (m_App.CoreEngine.IsMMTStream()) {
+		const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer =
+			m_App.CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+		if (pMMTAnalyzer == nullptr)
+			return false;
 
-	pInfo->NetworkID = pAnalyzer->GetNetworkID();
-	pInfo->TransportStreamID = pAnalyzer->GetTransportStreamID();
+		// TransportStreamID は tlv_stream_id
+		pInfo->NetworkID = pMMTAnalyzer->GetNetworkID();
+		pInfo->TransportStreamID = pMMTAnalyzer->GetTLVStreamID();
+	} else {
+		const LibISDB::AnalyzerFilter *pAnalyzer =
+			m_App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+		if (pAnalyzer == nullptr)
+			return false;
+
+		pInfo->NetworkID = pAnalyzer->GetNetworkID();
+		pInfo->TransportStreamID = pAnalyzer->GetTransportStreamID();
+	}
 	WORD ServiceID = m_App.CoreEngine.GetServiceID();
 	if (ServiceID == LibISDB::SERVICE_ID_INVALID) {
 		const int CurServiceID = m_App.ChannelManager.GetCurrentServiceID();
@@ -899,6 +921,21 @@ bool CAppCore::GetCurrentServiceName(LPTSTR pszName, int MaxLength, bool fUseCha
 
 	if (ServiceID == LibISDB::SERVICE_ID_INVALID)
 		return false;
+
+	if (m_App.CoreEngine.IsMMTStream()) {
+		const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer =
+			m_App.CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+		if (pMMTAnalyzer == nullptr)
+			return false;
+
+		const int Index = pMMTAnalyzer->GetServiceIndexByID(ServiceID);
+		LibISDB::String Name;
+		if (Index < 0 || !pMMTAnalyzer->GetServiceName(Index, &Name) || Name.empty())
+			return false;
+		StringCopy(pszName, Name.c_str(), MaxLength);
+
+		return true;
+	}
 
 	const LibISDB::AnalyzerFilter *pAnalyzer =
 		m_App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
@@ -1066,7 +1103,8 @@ bool CAppCore::Set1SegMode(bool f1Seg, bool fServiceChange)
 				const LibISDB::AnalyzerFilter *pAnalyzer =
 					m_App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
 
-				if (pAnalyzer->Has1SegService()) {
+				// MMT にワンセグは無い
+				if (!m_App.CoreEngine.IsMMTStream() && pAnalyzer->Has1SegService()) {
 					WORD ServiceID = LibISDB::SERVICE_ID_INVALID;
 					CChannelInfo ChInfo;
 
@@ -1172,7 +1210,9 @@ bool CAppCore::GenerateRecordFileName(LPTSTR pszFileName, int MaxFileName)
 	GetVariableStringEventInfo(&FormatInfo, 60 * 1000);
 
 	String Path;
-	if (!m_App.RecordManager.GenerateFilePath(FormatInfo, nullptr, &Path)) {
+	if (!m_App.RecordManager.GenerateFilePath(
+				FormatInfo, nullptr, &Path,
+				m_App.RecordOptions.IsMMTSExtensionEnabled() && m_App.CoreEngine.IsMMTStream())) {
 		OnError(TEXT("録画ファイルのパスを作成できません。"));
 		return false;
 	}
@@ -1489,6 +1529,48 @@ bool CAppCore::GetVariableStringEventInfo(
 				&& pInfo->Channel.GetServiceID() > 0)
 			pInfo->Channel.SetChannelNo(pInfo->Channel.GetServiceID());
 		pInfo->Channel.SetTunerName(m_App.CoreEngine.GetDriverFileName());
+	}
+
+	if (m_App.CoreEngine.IsMMTStream()) {
+		const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer = m_App.CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+
+		LibISDB::DateTime CurTime;
+		if (pMMTAnalyzer == nullptr || !pMMTAnalyzer->GetInterpolatedTOTTime(&CurTime))
+			LibISDB::GetCurrentEPGTime(&CurTime);
+		pInfo->TOTTime = CurTime;
+
+		if (WORD ServiceID;
+				pMMTAnalyzer != nullptr
+				&& (ServiceID = m_App.CoreEngine.GetServiceID()) != LibISDB::SERVICE_ID_INVALID) {
+			const int Index = pMMTAnalyzer->GetServiceIndexByID(ServiceID);
+			LibISDB::String ServiceName;
+			if (pMMTAnalyzer->GetServiceName(Index, &ServiceName))
+				pInfo->ServiceName = ServiceName;
+			bool fNext = false;
+			if (NextEventMargin > 0) {
+				LibISDB::EventInfo NextEvent;
+				if (pMMTAnalyzer->GetEventInfo(Index, &NextEvent, true)
+						&& NextEvent.StartTime.IsValid()) {
+					const long long Diff = NextEvent.StartTime.DiffMilliseconds(CurTime);
+					if (Diff >= 0 && Diff < static_cast<long long>(NextEventMargin))
+						fNext = true;
+				}
+			}
+			if (pMMTAnalyzer->GetEventInfo(Index, &pInfo->Event, fNext))
+				fEventInfoValid = true;
+			pInfo->Event.ServiceID = ServiceID;
+		} else {
+			pInfo->Event.ServiceID = LibISDB::SERVICE_ID_INVALID;
+		}
+		if (!fEventInfoValid) {
+			pInfo->Event.NetworkID = LibISDB::NETWORK_ID_INVALID;
+			pInfo->Event.TransportStreamID = LibISDB::TRANSPORT_STREAM_ID_INVALID;
+			pInfo->Event.EventID = LibISDB::EVENT_ID_INVALID;
+			pInfo->Event.StartTime.Reset();
+			pInfo->Event.Duration = 0;
+		}
+
+		return true;
 	}
 
 	const LibISDB::AnalyzerFilter *pAnalyzer = m_App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();

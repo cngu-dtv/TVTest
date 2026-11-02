@@ -59,13 +59,20 @@ bool CTotTimeAdjuster::AdjustTime()
 		return false;
 	}
 
-	const LibISDB::AnalyzerFilter *pAnalyzer =
-		GetAppClass().CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
-	if (pAnalyzer == nullptr)
-		return false;
+	const CCoreEngine &CoreEngine = GetAppClass().CoreEngine;
 	LibISDB::DateTime TOTTime;
-	if (!pAnalyzer->GetTOTTime(&TOTTime))
-		return false;
+	if (CoreEngine.IsMMTStream()) {
+		// MH-TOT
+		const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer = CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+		if (pMMTAnalyzer == nullptr || !pMMTAnalyzer->GetTOTTime(&TOTTime))
+			return false;
+	} else {
+		const LibISDB::AnalyzerFilter *pAnalyzer = CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+		if (pAnalyzer == nullptr)
+			return false;
+		if (!pAnalyzer->GetTOTTime(&TOTTime))
+			return false;
+	}
 
 	SYSTEMTIME st = TOTTime.ToSYSTEMTIME();
 	if (m_PrevTime.wYear == 0) {
@@ -150,6 +157,7 @@ void CEpgLoadEventHandler::OnEndEdcbDataLoading(bool fSuccess, LibISDB::EPGDatab
 
 
 CServiceUpdateInfo::CServiceUpdateInfo(LibISDB::TSEngine *pEngine, LibISDB::AnalyzerFilter *pAnalyzer)
+	: m_fMMT(false)
 {
 	pEngine->GetSelectableServiceList(&m_ServiceList);
 	m_CurService = -1;
@@ -166,6 +174,28 @@ CServiceUpdateInfo::CServiceUpdateInfo(LibISDB::TSEngine *pEngine, LibISDB::Anal
 	}
 	m_NetworkID = pAnalyzer->GetNetworkID();
 	m_TransportStreamID = pAnalyzer->GetTransportStreamID();
+	m_fServiceListEmpty = pAnalyzer->GetServiceCount() == 0;
+}
+
+
+CServiceUpdateInfo::CServiceUpdateInfo(LibISDB::TSEngine *pEngine, LibISDB::MMTAnalyzerFilter *pAnalyzer)
+	: m_fMMT(true)
+{
+	pEngine->GetSelectableMMTServiceList(&m_MMTServiceList);
+	m_CurService = -1;
+	if (!m_MMTServiceList.empty()) {
+		const WORD ServiceID = pEngine->GetServiceID();
+		if (ServiceID != LibISDB::SERVICE_ID_INVALID) {
+			for (size_t i = 0; i < m_MMTServiceList.size(); i++) {
+				if (m_MMTServiceList[i].ServiceID == ServiceID) {
+					m_CurService = static_cast<int>(i);
+					break;
+				}
+			}
+		}
+	}
+	m_NetworkID = pAnalyzer->GetNetworkID();
+	m_TransportStreamID = pAnalyzer->GetTLVStreamID();
 	m_fServiceListEmpty = pAnalyzer->GetServiceCount() == 0;
 }
 

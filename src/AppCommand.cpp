@@ -1456,7 +1456,9 @@ bool CAppCommand::SwitchVideo(CCommandManager::InvokeParameters &Params)
 	const LibISDB::AnalyzerFilter *pAnalyzer =
 		m_App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
 
+	// MMT のマルチビュー (MH-コンポーネントグループ記述子) は未対応
 	if ((pAnalyzer != nullptr)
+			&& !m_App.CoreEngine.IsMMTStream()
 			&& (pAnalyzer->GetEventComponentGroupCount(m_App.CoreEngine.GetServiceIndex()) > 0))
 		m_App.CommandManager.InvokeCommand(CM_MULTIVIEW_SWITCH);
 	else
@@ -1483,7 +1485,7 @@ bool CAppCommand::MultiViewSwitch(CCommandManager::InvokeParameters &Params)
 	const LibISDB::AnalyzerFilter *pAnalyzer =
 		m_App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
 
-	if (pAnalyzer != nullptr) {
+	if (pAnalyzer != nullptr && !m_App.CoreEngine.IsMMTStream()) {
 		const int ServiceIndex = m_App.CoreEngine.GetServiceIndex();
 		const int GroupCount = pAnalyzer->GetEventComponentGroupCount(ServiceIndex);
 
@@ -1659,6 +1661,7 @@ bool CAppCommand::MultiView(CCommandManager::InvokeParameters &Params)
 
 	if (ServiceIndex >= 0
 			&& pAnalyzer != nullptr
+			&& !m_App.CoreEngine.IsMMTStream()
 			&& pAnalyzer->GetEventComponentGroupInfo(ServiceIndex, Params.ID - CM_MULTIVIEW_FIRST, &GroupInfo)) {
 		int VideoIndex = -1, AudioIndex = -1;
 

@@ -326,13 +326,58 @@ bool CChannelScan::AutoUpdateChannelList(CTuningSpaceList *pTuningSpaceList, std
 	if (pTuningSpaceList == nullptr)
 		return false;
 
-	const LibISDB::AnalyzerFilter *pAnalyzer = GetAppClass().CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
-	LibISDB::AnalyzerFilter::SDTStreamList TsList;
+	const CCoreEngine &CoreEngine = GetAppClass().CoreEngine;
+	std::vector<ScanStreamInfo> TsList;
 
-	if (!pAnalyzer->IsSDTComplete()
-			|| !pAnalyzer->GetSDTStreamList(&TsList)
-			|| TsList.empty())
-		return false;
+	auto AddStream = [&TsList](WORD NetworkID, WORD TransportStreamID, const auto &ServiceList) {
+		ScanStreamInfo &Stream = TsList.emplace_back();
+		Stream.NetworkID = NetworkID;
+		Stream.TransportStreamID = TransportStreamID;
+		for (const auto &e : ServiceList) {
+			ScanServiceInfo &Service = Stream.ServiceList.emplace_back();
+			Service.ServiceID = e.ServiceID;
+			Service.ServiceType = e.ServiceType;
+			Service.ServiceName = e.ServiceName;
+		}
+	};
+
+	if (CoreEngine.IsMMTStream()) {
+		const LibISDB::MMTAnalyzerFilter *pAnalyzer = CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+		LibISDB::MMTAnalyzerFilter::SDTStreamList SDTList;
+		LibISDB::MMTAnalyzerFilter::NetworkStreamList NITList;
+
+		if (!pAnalyzer->IsMHSDTUpdated()
+				|| !pAnalyzer->IsTLVNITUpdated()
+				|| !pAnalyzer->GetSDTStreamList(&SDTList)
+				|| SDTList.empty()
+				|| !pAnalyzer->GetNetworkStreamList(&NITList))
+			return false;
+
+		// TLV-NIT の全ストリームの MH-SDT が揃っていること (AnalyzerFilter::IsSDTComplete と同じ判定)
+		for (const auto &NIT : NITList) {
+			if (std::ranges::none_of(
+					SDTList,
+					[&](const LibISDB::MMTAnalyzerFilter::SDTStreamInfo &SDT) {
+						return (SDT.OriginalNetworkID == NIT.OriginalNetworkID)
+							&& (SDT.TLVStreamID == NIT.TLVStreamID);
+					}))
+				return false;
+		}
+
+		for (const auto &e : SDTList)
+			AddStream(e.OriginalNetworkID, e.TLVStreamID, e.ServiceList);
+	} else {
+		const LibISDB::AnalyzerFilter *pAnalyzer = CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+		LibISDB::AnalyzerFilter::SDTStreamList SDTList;
+
+		if (!pAnalyzer->IsSDTComplete()
+				|| !pAnalyzer->GetSDTStreamList(&SDTList)
+				|| SDTList.empty())
+			return false;
+
+		for (const auto &e : SDTList)
+			AddStream(e.OriginalNetworkID, e.TransportStreamID, e.ServiceList);
+	}
 
 	bool fUpdated = false;
 	String Message;
@@ -340,7 +385,7 @@ bool CChannelScan::AutoUpdateChannelList(CTuningSpaceList *pTuningSpaceList, std
 	// 現在のチャンネルリストに存在しないサービスを探す
 	for (const auto &TsInfo : TsList) {
 		for (const auto &ServiceInfo : TsInfo.ServiceList) {
-			if (!IsScanService(ServiceInfo, false))
+			if (!IsScanService(ServiceInfo.ServiceName, ServiceInfo.ServiceType, false))
 				continue;
 
 			bool fFound = false;
@@ -349,7 +394,7 @@ bool CChannelScan::AutoUpdateChannelList(CTuningSpaceList *pTuningSpaceList, std
 				const CChannelList *pChannelList = pTuningSpaceList->GetChannelList(i);
 
 				if (pChannelList != nullptr) {
-					if (pChannelList->FindByIDs(TsInfo.OriginalNetworkID, 0, ServiceInfo.ServiceID, false) >= 0) {
+					if (pChannelList->FindByIDs(TsInfo.NetworkID, 0, ServiceInfo.ServiceID, false) >= 0) {
 						fFound = true;
 						break;
 					}
@@ -364,7 +409,7 @@ bool CChannelScan::AutoUpdateChannelList(CTuningSpaceList *pTuningSpaceList, std
 					CChannelList *pChannelList = pTuningSpaceList->GetChannelList(Space);
 
 					if (pChannelList != nullptr) {
-						int Index = pChannelList->FindByIDs(TsInfo.OriginalNetworkID, TsInfo.TransportStreamID, 0, false);
+						int Index = pChannelList->FindByIDs(TsInfo.NetworkID, TsInfo.TransportStreamID, 0, false);
 						if (Index >= 0) {
 							CChannelInfo ChannelInfo(*pChannelList->GetChannelInfo(Index));
 
@@ -378,7 +423,7 @@ bool CChannelScan::AutoUpdateChannelList(CTuningSpaceList *pTuningSpaceList, std
 
 								if (pChannelInfo->GetSpace() != ChannelInfo.GetSpace()
 										|| pChannelInfo->GetChannelIndex() != ChannelInfo.GetChannelIndex()
-										|| pChannelInfo->GetNetworkID() != TsInfo.OriginalNetworkID
+										|| pChannelInfo->GetNetworkID() != TsInfo.NetworkID
 										|| pChannelInfo->GetTransportStreamID() != TsInfo.TransportStreamID
 										|| pChannelInfo->GetServiceID() > ServiceInfo.ServiceID)
 									break;
@@ -410,7 +455,7 @@ bool CChannelScan::AutoUpdateChannelList(CTuningSpaceList *pTuningSpaceList, std
 						TEXT("新しいサービス {} \"{}\" (NID {} TSID {:#04x}) が検出されましたが、当該 TS が見付かりません。"),
 						ServiceInfo.ServiceID,
 						ServiceInfo.ServiceName,
-						TsInfo.OriginalNetworkID,
+						TsInfo.NetworkID,
 						TsInfo.TransportStreamID);
 					pMessageList->push_back(Message);
 				}
@@ -428,7 +473,7 @@ bool CChannelScan::AutoUpdateChannelList(CTuningSpaceList *pTuningSpaceList, std
 				bool fNetworkFound = false, fServiceFound = false, fServiceMoved = false;
 
 				for (const auto &TsInfo : TsList) {
-					if (TsInfo.OriginalNetworkID == pChannelInfo->GetNetworkID()) {
+					if (TsInfo.NetworkID == pChannelInfo->GetNetworkID()) {
 						fNetworkFound = true;
 
 						for (const auto &ServiceInfo : TsInfo.ServiceList) {
@@ -437,7 +482,7 @@ bool CChannelScan::AutoUpdateChannelList(CTuningSpaceList *pTuningSpaceList, std
 
 								if (TsInfo.TransportStreamID != pChannelInfo->GetTransportStreamID()) {
 									// TS移動
-									int Index = pChannelList->FindByIDs(TsInfo.OriginalNetworkID, TsInfo.TransportStreamID, 0, false);
+									int Index = pChannelList->FindByIDs(TsInfo.NetworkID, TsInfo.TransportStreamID, 0, false);
 									if (Index >= 0) {
 										const CChannelInfo *pMoveChInfo = pChannelList->GetChannelInfo(Index);
 										CChannelInfo ChannelInfo(*pChannelInfo);
@@ -451,7 +496,7 @@ bool CChannelScan::AutoUpdateChannelList(CTuningSpaceList *pTuningSpaceList, std
 
 											if (pChInfo->GetSpace() != ChannelInfo.GetSpace()
 													|| pChInfo->GetChannelIndex() != ChannelInfo.GetChannelIndex()
-													|| pChInfo->GetNetworkID() != TsInfo.OriginalNetworkID
+													|| pChInfo->GetNetworkID() != TsInfo.NetworkID
 													|| pChInfo->GetTransportStreamID() != TsInfo.TransportStreamID
 													|| pChInfo->GetServiceID() > ServiceInfo.ServiceID)
 												break;
@@ -1497,6 +1542,8 @@ void CChannelScan::Scan()
 	CAppMain &App = GetAppClass();
 	const LibISDB::AnalyzerFilter *pAnalyzer =
 		App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+	const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer =
+		App.CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
 	LibISDB::BonDriverSourceFilter *pSource =
 		App.CoreEngine.GetFilter<LibISDB::BonDriverSourceFilter>();
 
@@ -1542,8 +1589,8 @@ void CChannelScan::Scan()
 		if (m_ScanWait > 2000U) {
 			DWORD Wait = m_ScanWait - 2000;
 			while (true) {
-				// SDTが来たら待ち時間終了
-				if (pAnalyzer->IsSDTUpdated())
+				// SDT (MMT では MH-SDT) が来たら待ち時間終了
+				if (pAnalyzer->IsSDTUpdated() || pMMTAnalyzer->IsMHSDTUpdated())
 					break;
 				if (::WaitForSingleObject(m_hCancelEvent, std::min<DWORD>(Wait, 1000)) != WAIT_TIMEOUT)
 					goto End;
@@ -1555,13 +1602,14 @@ void CChannelScan::Scan()
 
 		bool fScanService = m_fScanService;
 		bool fFound = false;
-		LibISDB::AnalyzerFilter::SDTServiceList ServiceList;
+		ScanStreamInfo StreamInfo;
 		LibISDB::String Name;
 
 		m_ChannelMaxSignalLevel = 0.0f;
 		const float SignalLevel = GetSignalLevel();
 
 		if (pAnalyzer->IsSDTUpdated()
+				|| pMMTAnalyzer->IsMHSDTUpdated()
 				|| m_fIgnoreSignalLevel
 				|| SignalLevel >= m_SignalLevelThreshold) {
 			for (int i = 0; i <= m_RetryCount; i++) {
@@ -1570,28 +1618,18 @@ void CChannelScan::Scan()
 						goto End;
 					GetSignalLevel();
 				}
-				if (pAnalyzer->IsSDTUpdated()
-						&& pAnalyzer->GetSDTServiceList(&ServiceList)
-						&& !ServiceList.empty()) {
+				const bool fMMT = App.CoreEngine.IsMMTStream();
+				if (fMMT ?
+						GetMMTScanStreamInfo(pMMTAnalyzer, &StreamInfo) :
+						GetTSScanStreamInfo(pAnalyzer, &StreamInfo)) {
+					// TLV は高度BS/高度広帯域CS で使われるので、BS/CS と同じくサービスを検索する
+					if (fMMT)
+						fScanService = true;
 					if (fScanService) {
-						if (pAnalyzer->GetServiceCount() > 0) {
-							// サービスのPMTが揃ったら完了
-							// (サービスが視聴可能かどうかPMTの情報で判定するため)
-							size_t i;
-							for (i = 0; i < ServiceList.size(); i++) {
-								if (IsScanService(ServiceList[i])) {
-									const int ServiceIndex = pAnalyzer->GetServiceIndexByID(ServiceList[i].ServiceID);
-									if (ServiceIndex >= 0 && !pAnalyzer->IsServicePMTAcquired(ServiceIndex))
-										break;
-								}
-							}
-							if (i == ServiceList.size()) {
-								fFound = true;
-								break;
-							}
-						}
-						// 時間内にPMTが来ない場合、PMTの情報なしで継続する
-						if (!fFound && i == m_RetryCount) {
+						// サービスのPMT (MMT では MPT とリモコンキーの TLV-NIT) が揃ったら完了
+						// (サービスが視聴可能かどうかPMT/MPTの情報で判定するため)
+						// 時間内に揃わない場合、その情報なしで継続する
+						if (StreamInfo.fComplete || i == m_RetryCount) {
 							fFound = true;
 							break;
 						}
@@ -1612,32 +1650,30 @@ void CChannelScan::Scan()
 			}
 		}
 		if (fFound) {
-			const WORD TransportStreamID = pAnalyzer->GetTransportStreamID();
-			const WORD NetworkID = pAnalyzer->GetNetworkID();
+			const WORD TransportStreamID = StreamInfo.TransportStreamID;
+			const WORD NetworkID = StreamInfo.NetworkID;
 
 			// 見付かったチャンネルを追加する
 			if (fScanService) {
 				int ServiceCount = 0;
-				for (size_t i = 0; i < ServiceList.size(); i++) {
-					const LibISDB::AnalyzerFilter::SDTServiceInfo &ServiceInfo = ServiceList[i];
+				for (size_t i = 0; i < StreamInfo.ServiceList.size(); i++) {
+					const ScanServiceInfo &ServiceInfo = StreamInfo.ServiceList[i];
 
-					if (!IsScanService(ServiceInfo))
+					if (!IsScanService(ServiceInfo.ServiceName, ServiceInfo.ServiceType))
 						continue;
 
 					const WORD ServiceID = ServiceInfo.ServiceID;
 
 					// 視聴不可のサービスを除外
-					const int ServiceIndex = pAnalyzer->GetServiceIndexByID(ServiceID);
-					if (ServiceIndex >= 0
-							&& pAnalyzer->IsServicePMTAcquired(ServiceIndex)) {
-						if (!App.CoreEngine.IsSelectableService(ServiceIndex))
+					if (ServiceInfo.fInfoAcquired) {
+						if (!App.CoreEngine.IsSelectableService(ServiceInfo.ServiceIndex))
 							continue;
 					} else {
 						if (ServiceInfo.ServiceType == LibISDB::SERVICE_TYPE_PROMOTION_VIDEO)
 							continue;
 					}
 					if (ServiceInfo.ServiceType == LibISDB::SERVICE_TYPE_DATA) {
-						if (pAnalyzer->Is1SegService(ServiceIndex)) {
+						if (ServiceInfo.f1Seg) {
 							if (!m_fDetect1SegService)
 								continue;
 						} else {
@@ -1646,7 +1682,7 @@ void CChannelScan::Scan()
 						}
 					}
 
-					int RemoteControlKeyID = pAnalyzer->GetRemoteControlKeyID();
+					int RemoteControlKeyID = ServiceInfo.RemoteControlKeyID;
 					if (RemoteControlKeyID == 0) {
 						RemoteControlKeyID =
 							App.NetworkDefinition.GetRemoteControlKeyID(NetworkID, ServiceID);
@@ -1702,8 +1738,8 @@ void CChannelScan::Scan()
 				pChInfo->SetNetworkID(NetworkID);
 				pChInfo->SetTransportStreamID(TransportStreamID);
 
-				for (auto it = ServiceList.begin(); it != ServiceList.end(); ++it) {
-					if (IsScanService(*it)
+				for (auto it = StreamInfo.ServiceList.begin(); it != StreamInfo.ServiceList.end(); ++it) {
+					if (IsScanService(it->ServiceName, it->ServiceType)
 							&& (
 #ifdef TVTEST_FOR_1SEG
 								it->ServiceType == LibISDB::SERVICE_TYPE_DATA
@@ -1750,6 +1786,86 @@ End:
 }
 
 
+bool CChannelScan::GetTSScanStreamInfo(const LibISDB::AnalyzerFilter *pAnalyzer, ScanStreamInfo *pInfo) const
+{
+	LibISDB::AnalyzerFilter::SDTServiceList ServiceList;
+
+	if (!pAnalyzer->IsSDTUpdated()
+			|| !pAnalyzer->GetSDTServiceList(&ServiceList)
+			|| ServiceList.empty())
+		return false;
+
+	pInfo->NetworkID = pAnalyzer->GetNetworkID();
+	pInfo->TransportStreamID = pAnalyzer->GetTransportStreamID();
+	pInfo->ServiceList.clear();
+	pInfo->ServiceList.reserve(ServiceList.size());
+
+	const int RemoteControlKeyID = pAnalyzer->GetRemoteControlKeyID();
+	bool fComplete = pAnalyzer->GetServiceCount() > 0;
+
+	for (const auto &e : ServiceList) {
+		ScanServiceInfo &Service = pInfo->ServiceList.emplace_back();
+
+		Service.ServiceID = e.ServiceID;
+		Service.ServiceType = e.ServiceType;
+		Service.ServiceName = e.ServiceName;
+		Service.ServiceIndex = pAnalyzer->GetServiceIndexByID(e.ServiceID);
+		if (Service.ServiceIndex >= 0) {
+			Service.fInfoAcquired = pAnalyzer->IsServicePMTAcquired(Service.ServiceIndex);
+			Service.f1Seg = pAnalyzer->Is1SegService(Service.ServiceIndex);
+		}
+		Service.RemoteControlKeyID = RemoteControlKeyID;
+
+		if ((Service.ServiceIndex >= 0) && !Service.fInfoAcquired
+				&& IsScanService(Service.ServiceName, Service.ServiceType))
+			fComplete = false;
+	}
+
+	pInfo->fComplete = fComplete;
+
+	return true;
+}
+
+
+bool CChannelScan::GetMMTScanStreamInfo(const LibISDB::MMTAnalyzerFilter *pAnalyzer, ScanStreamInfo *pInfo) const
+{
+	LibISDB::MMTAnalyzerFilter::SDTServiceList ServiceList;
+
+	if (!pAnalyzer->IsMHSDTUpdated()
+			|| !pAnalyzer->GetSDTServiceList(&ServiceList)
+			|| ServiceList.empty())
+		return false;
+
+	pInfo->NetworkID = pAnalyzer->GetNetworkID();
+	pInfo->TransportStreamID = pAnalyzer->GetTLVStreamID();
+	pInfo->ServiceList.clear();
+	pInfo->ServiceList.reserve(ServiceList.size());
+
+	// リモコンキーは TLV-NIT で送られる (ARIB TR-B39 第1部 第4編 36.1.2.3)
+	bool fComplete = (pAnalyzer->GetServiceCount() > 0) && pAnalyzer->IsTLVNITUpdated();
+
+	for (const auto &e : ServiceList) {
+		ScanServiceInfo &Service = pInfo->ServiceList.emplace_back();
+
+		Service.ServiceID = e.ServiceID;
+		Service.ServiceType = e.ServiceType;
+		Service.ServiceName = e.ServiceName;
+		Service.ServiceIndex = pAnalyzer->GetServiceIndexByID(e.ServiceID);
+		if (Service.ServiceIndex >= 0)
+			Service.fInfoAcquired = pAnalyzer->IsServiceMPTAcquired(Service.ServiceIndex);
+		Service.RemoteControlKeyID = pAnalyzer->GetRemoteControlKeyID(e.ServiceID);
+
+		if ((Service.ServiceIndex >= 0) && !Service.fInfoAcquired
+				&& IsScanService(Service.ServiceName, Service.ServiceType))
+			fComplete = false;
+	}
+
+	pInfo->fComplete = fComplete;
+
+	return true;
+}
+
+
 float CChannelScan::GetSignalLevel()
 {
 	const LibISDB::BonDriverSourceFilter *pSource =
@@ -1769,12 +1885,12 @@ float CChannelScan::GetSignalLevel()
 }
 
 
-bool CChannelScan::IsScanService(const LibISDB::AnalyzerFilter::SDTServiceInfo &ServiceInfo, bool fData) const
+bool CChannelScan::IsScanService(const String &ServiceName, BYTE ServiceType, bool fData) const
 {
-	return !ServiceInfo.ServiceName.empty()
-		&& ServiceInfo.ServiceName.compare(TEXT(" ")) != 0
-		&& ServiceInfo.ServiceName.compare(TEXT("　")) != 0
-		&& IsScanServiceType(ServiceInfo.ServiceType, fData);
+	return !ServiceName.empty()
+		&& ServiceName.compare(TEXT(" ")) != 0
+		&& ServiceName.compare(TEXT("　")) != 0
+		&& IsScanServiceType(ServiceType, fData);
 }
 
 

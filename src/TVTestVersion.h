@@ -31,6 +31,8 @@
 
 #define VERSION_STATUS_A "dev"
 
+#define VERSION_FORK_A   "cngu"
+
 #ifndef RC_INVOKED
 #if __has_include("TVTestVersionHash.h")
 #include "TVTestVersionHash.h"
@@ -42,6 +44,9 @@
 #ifdef VERSION_STATUS_A
 #define VERSION_STATUS_W LTEXT(VERSION_STATUS_A)
 #endif
+#ifdef VERSION_FORK_A
+#define VERSION_FORK_W   LTEXT(VERSION_FORK_A)
+#endif
 #ifndef UNICODE
 #define VERSION_TEXT     VERSION_TEXT_A
 #ifdef VERSION_HASH_A
@@ -49,6 +54,9 @@
 #endif
 #ifdef VERSION_STATUS_A
 #define VERSION_STATUS   VERSION_STATUS_A
+#endif
+#ifdef VERSION_FORK_A
+#define VERSION_FORK     VERSION_FORK_A
 #endif
 #else
 #define VERSION_TEXT     VERSION_TEXT_W
@@ -58,6 +66,9 @@
 #ifdef VERSION_STATUS_W
 #define VERSION_STATUS   VERSION_STATUS_W
 #endif
+#ifdef VERSION_FORK_W
+#define VERSION_FORK     VERSION_FORK_W
+#endif
 #endif
 
 #if defined(_M_IX86)
@@ -66,10 +77,15 @@
 #define VERSION_PLATFORM TEXT("x64")
 #endif
 
-#ifdef VERSION_STATUS
-#define ABOUT_VERSION_TEXT APP_NAME TEXT(" ver.") VERSION_TEXT TEXT("-") VERSION_STATUS
+#ifdef VERSION_FORK
+#define ABOUT_VERSION_FORK_TEXT TEXT("-") VERSION_FORK
 #else
-#define ABOUT_VERSION_TEXT APP_NAME TEXT(" ver.") VERSION_TEXT
+#define ABOUT_VERSION_FORK_TEXT
+#endif
+#ifdef VERSION_STATUS
+#define ABOUT_VERSION_TEXT APP_NAME TEXT(" ver.") VERSION_TEXT ABOUT_VERSION_FORK_TEXT TEXT("-") VERSION_STATUS
+#else
+#define ABOUT_VERSION_TEXT APP_NAME TEXT(" ver.") VERSION_TEXT ABOUT_VERSION_FORK_TEXT
 #endif
 
 

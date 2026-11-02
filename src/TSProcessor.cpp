@@ -156,6 +156,12 @@ void CTSProcessor::SetActiveServiceID(uint16_t ServiceID)
 
 bool CTSProcessor::ReceiveData(LibISDB::DataStream *pData)
 {
+	// ソース以外の接続位置のプラグインには 188 バイトの TS パケットだけを渡す (TLV は素通し)
+	if (!m_fSourceProcessor && !pData->Is<LibISDB::TSPacket>()) {
+		OutputData(pData);
+		return true;
+	}
+
 	do {
 		m_pTSPacket->SetDataBuffer(pData->GetData());
 		m_pTSProcessor->InputPacket(m_pTSPacket);

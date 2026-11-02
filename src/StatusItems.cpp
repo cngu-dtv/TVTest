@@ -713,14 +713,27 @@ bool CClockStatusItem::UpdateContent()
 	LibISDB::DateTime Time;
 
 	if (m_fTOT) {
-		const LibISDB::AnalyzerFilter *pAnalyzer =
-			GetAppClass().CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+		const CCoreEngine &CoreEngine = GetAppClass().CoreEngine;
 		bool fResult;
 
-		if (m_fInterpolateTOT)
-			fResult = pAnalyzer->GetInterpolatedTOTTime(&Time);
-		else
-			fResult = pAnalyzer->GetTOTTime(&Time);
+		if (CoreEngine.IsMMTStream()) {
+			// MH-TOT
+			const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer =
+				CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+
+			if (m_fInterpolateTOT)
+				fResult = pMMTAnalyzer->GetInterpolatedTOTTime(&Time);
+			else
+				fResult = pMMTAnalyzer->GetTOTTime(&Time);
+		} else {
+			const LibISDB::AnalyzerFilter *pAnalyzer =
+				CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+
+			if (m_fInterpolateTOT)
+				fResult = pAnalyzer->GetInterpolatedTOTTime(&Time);
+			else
+				fResult = pAnalyzer->GetTOTTime(&Time);
+		}
 		if (!fResult)
 			Time.Reset();
 	} else {
@@ -989,13 +1002,17 @@ void CProgramInfoStatusItem::EnablePopupInfo(bool fEnable)
 bool CProgramInfoStatusItem::UpdateProgress()
 {
 	if (m_fShowProgress) {
+		const CCoreEngine &CoreEngine = GetAppClass().CoreEngine;
 		const LibISDB::AnalyzerFilter *pAnalyzer =
-			GetAppClass().CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+			CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+		const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer =
+			CoreEngine.IsMMTStream() ? CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>() : nullptr;
 		LibISDB::DateTime CurTime;
 		const bool fValid =
 			m_EventInfo.StartTime.IsValid() &&
-			pAnalyzer != nullptr &&
-			pAnalyzer->GetTOTTime(&CurTime);
+			(pMMTAnalyzer != nullptr ?
+				pMMTAnalyzer->GetTOTTime(&CurTime) :
+				pAnalyzer != nullptr && pAnalyzer->GetTOTTime(&CurTime));
 		bool fUpdated;
 
 		if (fValid) {

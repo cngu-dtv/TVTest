@@ -612,9 +612,15 @@ HRESULT CTaskbarManager::AddRecentChannelsCategory(ICustomDestinationList *pcdl)
 
 			bool fUseIcon = true;
 			const DWORD MapKey = ChannelIconMapKey(NetworkID, ServiceID);
-			constexpr BYTE LogoType = CLogoManager::LOGOTYPE_48x24;
+			BYTE LogoType = CLogoManager::LOGOTYPE_48x24;
 			CLogoManager::LogoInfo LogoInfo;
-			if (App.LogoManager.GetLogoInfo(NetworkID, ServiceID, LogoType, &LogoInfo)) {
+			bool fLogo = App.LogoManager.GetLogoInfo(NetworkID, ServiceID, LogoType, &LogoInfo);
+			if (!fLogo) {
+				// 高度BS のロゴには 48x24 が無い
+				LogoType = CLogoManager::LOGOTYPE_64x36;
+				fLogo = App.LogoManager.GetLogoInfo(NetworkID, ServiceID, LogoType, &LogoInfo);
+			}
+			if (fLogo) {
 				bool fSave;
 				auto it = m_ChannelIconMap.find(MapKey);
 				if (it != m_ChannelIconMap.end())

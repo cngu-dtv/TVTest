@@ -24,6 +24,7 @@
 
 #include <vector>
 #include <unordered_map>
+#include "LibISDB/LibISDB/EPG/EventInfo.hpp"
 
 
 namespace TVTest
@@ -79,6 +80,12 @@ namespace TVTest
 		}
 		static constexpr BYTE IDToComponentTag(IDType ID) { return static_cast<BYTE>(ID & 0xFF); }
 		static constexpr int IDToStreamIndex(IDType ID) { return static_cast<INT8>(static_cast<BYTE>(ID >> 8)); }
+		// MMT の component_tag (16 ビット) は運用上 0x007F 以下なので 8 ビットで扱う
+		static constexpr BYTE MMTComponentTagToByte(uint16_t ComponentTag)
+		{
+			return ComponentTag < LibISDB::COMPONENT_TAG_INVALID ?
+				static_cast<BYTE>(ComponentTag) : LibISDB::COMPONENT_TAG_INVALID;
+		}
 
 		int GetAudioCount() const;
 		bool GetAudioInfo(int Index, AudioInfo *pInfo) const;
@@ -106,6 +113,9 @@ namespace TVTest
 		mutable MutexLock m_Lock;
 		AudioComponentList m_AudioComponentList;
 		AudioList m_EventAudioList;
+		bool m_fMMT = false;
+		// MPT の MH-音声コンポーネント記述子の内容 (MMT)
+		LibISDB::EventInfo::AudioInfoList m_MMTAudioComponentList;
 		AudioList m_AudioList;
 		AudioSelectInfo m_SelectedAudio;
 		WORD m_CurTransportStreamID = LibISDB::TRANSPORT_STREAM_ID_INVALID;
@@ -118,6 +128,9 @@ namespace TVTest
 		}
 
 		void MakeAudioList();
+		static void AppendEventAudio(const LibISDB::EventInfo::AudioInfo &EventAudio, AudioList *pList);
+		static bool IsMMTAudioSelectionConditionChanged(
+			const LibISDB::EventInfo::AudioInfoList &List1, const LibISDB::EventInfo::AudioInfoList &List2);
 	};
 
 } // namespace TVTest

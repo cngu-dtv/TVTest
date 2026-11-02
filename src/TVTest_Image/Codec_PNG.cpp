@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <vector>
 #include "libpng/png.h"
 #include "zlib/zlib.h"
 #include "ImageLib.h"
@@ -369,6 +370,10 @@ HGLOBAL LoadAribPng(const void *pData, size_t DataSize)
 	IHDR ImageHeader;
 	const BYTE *pCompressedImageData = nullptr;
 	size_t CompressedImageSize = 0;
+	std::vector<BYTE> CompressedImageBuffer;
+	// PLTE が無ければ ARIB の共通固定色を使う。高度BS の Small/Large ロゴは PLTE を持つ
+	RGBA Palette[256];
+	int PaletteCount = 0;
 
 	size_t Pos = 8;
 	while (Pos + 8 < DataSize) {
@@ -402,9 +407,37 @@ HGLOBAL LoadAribPng(const void *pData, size_t DataSize)
 				return nullptr;
 			break;
 
+		case CHUNK_TYPE('P', 'L', 'T', 'E'):
+			if ((ChunkSize % 3 != 0) || (ChunkSize / 3 > 256))
+				return nullptr;
+			PaletteCount = ChunkSize / 3;
+			for (int i = 0; i < PaletteCount; i++) {
+				Palette[i].Red   = p[Pos + i * 3 + 0];
+				Palette[i].Green = p[Pos + i * 3 + 1];
+				Palette[i].Blue  = p[Pos + i * 3 + 2];
+				Palette[i].Alpha = 255;
+			}
+			break;
+
+		case CHUNK_TYPE('t', 'R', 'N', 'S'):
+			if (ImageHeader.ColorType == 3) {
+				for (DWORD i = 0; (i < ChunkSize) && (i < static_cast<DWORD>(PaletteCount)); i++)
+					Palette[i].Alpha = p[Pos + i];
+			}
+			break;
+
 		case CHUNK_TYPE('I', 'D', 'A', 'T'):
-			pCompressedImageData = &p[Pos];
-			CompressedImageSize = ChunkSize;
+			if (pCompressedImageData == nullptr) {
+				pCompressedImageData = &p[Pos];
+				CompressedImageSize = ChunkSize;
+			} else {
+				// 複数の IDAT は連結した 1 つの圧縮データ
+				if (CompressedImageBuffer.empty())
+					CompressedImageBuffer.assign(pCompressedImageData, pCompressedImageData + CompressedImageSize);
+				CompressedImageBuffer.insert(CompressedImageBuffer.end(), &p[Pos], &p[Pos] + ChunkSize);
+				pCompressedImageData = CompressedImageBuffer.data();
+				CompressedImageSize = CompressedImageBuffer.size();
+			}
 			break;
 
 		case CHUNK_TYPE('I', 'E', 'N', 'D'):
@@ -558,7 +591,11 @@ Decode:
 					break;
 				case 3: // Indexed
 					{
-						const RGBA &Color = DefaultPalette[Sample[0] < 128 ? Sample[0] : 8];
+						// パレットの範囲外は透明 (DefaultPalette[8])
+						const RGBA &Color =
+							(PaletteCount > 0) ?
+								(Sample[0] < PaletteCount ? Palette[Sample[0]] : DefaultPalette[8]) :
+								DefaultPalette[Sample[0] < 128 ? Sample[0] : 8];
 						pDestLine[x1 * 4 + 0] = Color.Blue;
 						pDestLine[x1 * 4 + 1] = Color.Green;
 						pDestLine[x1 * 4 + 2] = Color.Red;

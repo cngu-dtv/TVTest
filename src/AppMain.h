@@ -110,7 +110,9 @@ namespace TVTest
 	class CServiceUpdateInfo
 	{
 	public:
+		bool m_fMMT;
 		LibISDB::AnalyzerFilter::ServiceList m_ServiceList;
+		LibISDB::MMTAnalyzerFilter::ServiceList m_MMTServiceList;
 		int m_CurService;
 		WORD m_NetworkID;
 		WORD m_TransportStreamID;
@@ -118,6 +120,7 @@ namespace TVTest
 		bool m_fServiceListEmpty;
 
 		CServiceUpdateInfo(LibISDB::TSEngine *pEngine, LibISDB::AnalyzerFilter *pAnalyzer);
+		CServiceUpdateInfo(LibISDB::TSEngine *pEngine, LibISDB::MMTAnalyzerFilter *pAnalyzer);
 	};
 
 
@@ -318,10 +321,18 @@ namespace TVTest
 			void OnFilterGraphFinalize(LibISDB::ViewerFilter *pViewer, IGraphBuilder *pGraphBuilder) override;
 			void OnFilterGraphFinalized(LibISDB::ViewerFilter *pViewer, IGraphBuilder *pGraphBuilder) override;
 			void OnSPDIFPassthroughError(LibISDB::ViewerFilter *pViewer, HRESULT hr) override;
+			void OnPLTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer, bool StreamChanged) override;
+			void OnMPTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer, uint16_t ServiceID) override;
+			void OnMHSDTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer) override;
+			void OnEventChanged(LibISDB::MMTAnalyzerFilter *pAnalyzer, uint16_t EventID) override;
+			void OnMHEITUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer) override;
+			void OnMHTOTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer) override;
 
 			// CEngineEventListener
 			void OnServiceUpdated(LibISDB::AnalyzerFilter *pAnalyzer, bool fListUpdated, bool fStreamChanged);
 			void OnServiceInfoUpdated(LibISDB::AnalyzerFilter *pAnalyzer);
+			void OnServiceUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer, bool fListUpdated, bool fStreamChanged);
+			void OnServiceInfoUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer);
 		};
 
 		class CStreamInfoEventHandler

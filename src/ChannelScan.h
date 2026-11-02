@@ -113,6 +113,26 @@ namespace TVTest
 			CChannelScan *m_pChannelScan;
 		};
 
+		// スキャンで使うサービスの情報 (TS と MMT で共通)
+		struct ScanServiceInfo
+		{
+			WORD ServiceID;
+			BYTE ServiceType;
+			String ServiceName;
+			int ServiceIndex = -1;       // 解析中のサービスの番号 (PAT/PLT に無ければ -1)
+			bool fInfoAcquired = false;  // PMT (MMT では MPT) を取得済みか
+			bool f1Seg = false;
+			int RemoteControlKeyID = 0;  // 0 なら NetworkDefinition の割り当てを使う
+		};
+
+		struct ScanStreamInfo
+		{
+			WORD NetworkID;
+			WORD TransportStreamID;      // MMT では tlv_stream_id
+			std::vector<ScanServiceInfo> ServiceList;
+			bool fComplete = false;      // サービスの判定に必要な情報が揃ったか
+		};
+
 		int m_ScanSpace = -1;
 		int m_ScanChannel = -1;
 		const CTuningSpaceList *m_pOriginalTuningSpaceList = nullptr;
@@ -152,9 +172,11 @@ namespace TVTest
 		bool LoadPreset(LPCTSTR pszFileName, CChannelList *pChannelList, int Space, bool *pfCorrupted);
 		bool SetPreset(bool fAuto);
 		void Scan();
+		bool GetTSScanStreamInfo(const LibISDB::AnalyzerFilter *pAnalyzer, ScanStreamInfo *pInfo) const;
+		bool GetMMTScanStreamInfo(const LibISDB::MMTAnalyzerFilter *pAnalyzer, ScanStreamInfo *pInfo) const;
 		float GetSignalLevel();
 		INT_PTR ScanDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
-		bool IsScanService(const LibISDB::AnalyzerFilter::SDTServiceInfo &ServiceInfo, bool fData = true) const;
+		bool IsScanService(const String &ServiceName, BYTE ServiceType, bool fData = true) const;
 		bool IsScanServiceType(BYTE ServiceType, bool fData = true) const;
 
 		static unsigned int __stdcall ScanProc(LPVOID lpParameter);

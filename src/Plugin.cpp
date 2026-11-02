@@ -33,6 +33,7 @@
 #include "TVTestVersion.h"
 #include "DarkMode.h"
 #include "LibISDB/LibISDB/Base/ARIBString.hpp"
+#include "LibISDB/LibISDB/TLV/TLVPacket.hpp"
 #include "resource.h"
 #include <algorithm>
 #include "Common/DebugDef.h"
@@ -651,6 +652,64 @@ static bool CopyESList(const LibISDB::AnalyzerFilter::ESInfoList &SrcList, Eleme
 }
 
 
+static uint8_t GetMMTAssetStreamType(const LibISDB::MMTAnalyzerFilter::AssetInfo &Asset)
+{
+	switch (Asset.AssetType) {
+	case LibISDB::MMT_ASSET_TYPE_HEV1:
+	case LibISDB::MMT_ASSET_TYPE_HVC1:
+		return LibISDB::STREAM_TYPE_H265;
+
+	case LibISDB::MMT_ASSET_TYPE_MP4A:
+		return Asset.StreamType;
+	}
+
+	return LibISDB::STREAM_TYPE_INVALID;
+}
+
+
+// MMT は PID の欄に packet_id を入れる
+static bool CopyESList(const LibISDB::MMTAnalyzerFilter::AssetInfoList &SrcList, ElementaryStreamInfoList *pList)
+{
+	pList->ESCount = static_cast<WORD>(SrcList.size());
+	pList->ESList = static_cast<ElementaryStreamInfo *>(std::malloc(sizeof(ElementaryStreamInfo) * SrcList.size()));
+	if (pList->ESList == nullptr)
+		return false;
+
+	for (size_t i = 0; i < SrcList.size(); i++) {
+		const LibISDB::MMTAnalyzerFilter::AssetInfo &SrcInfo = SrcList[i];
+		ElementaryStreamInfo &Info = pList->ESList[i];
+		Info.PID = SrcInfo.PacketID;
+		Info.HierarchicalReferencePID = 0xFFFF;
+		Info.StreamType = GetMMTAssetStreamType(SrcInfo);
+		Info.ComponentTag = CAudioManager::MMTComponentTagToByte(SrcInfo.ComponentTag);
+		Info.QualityLevel = 0xFF;
+		Info.Reserved = 0;
+	}
+
+	return true;
+}
+
+
+static const LibISDB::MMTAnalyzerFilter::AssetInfoList * GetMMTAssetList(
+	const LibISDB::MMTAnalyzerFilter::ServiceInfo &Info, ElementaryStreamMediaType Media)
+{
+	switch (Media) {
+	case ES_MEDIA_ALL:
+		return &Info.AssetList;
+	case ES_MEDIA_VIDEO:
+		return &Info.VideoAssetList;
+	case ES_MEDIA_AUDIO:
+		return &Info.AudioAssetList;
+	case ES_MEDIA_CAPTION:
+		return &Info.CaptionAssetList;
+	case ES_MEDIA_DATA_CARROUSEL:
+		return &Info.ApplicationAssetList;
+	}
+
+	return nullptr;
+}
+
+
 static void AnalyzerServiceInfoToServiceInfo2(
 	const LibISDB::AnalyzerFilter::ServiceInfo &Info, ServiceInfo2 *pServiceInfo)
 {
@@ -664,6 +723,41 @@ static void AnalyzerServiceInfoToServiceInfo2(
 	pServiceInfo->PCR_PID = Info.PCRPID;
 	StringCopy(pServiceInfo->szServiceName, Info.ServiceName.c_str());
 	StringCopy(pServiceInfo->szProviderName, Info.ProviderName.c_str());
+}
+
+
+// MMT は PMT の PID の欄に MPT の packet_id を入れる (PCR は無い)
+static void AnalyzerServiceInfoToServiceInfo2(
+	const LibISDB::MMTAnalyzerFilter::ServiceInfo &Info, ServiceInfo2 *pServiceInfo)
+{
+	pServiceInfo->Status = SERVICE_INFO2_STATUS_NONE;
+	if (Info.FreeCAMode)
+		pServiceInfo->Status |= SERVICE_INFO2_STATUS_FREE_CA_MODE;
+	pServiceInfo->ServiceID = Info.ServiceID;
+	pServiceInfo->ServiceType = Info.ServiceType;
+	pServiceInfo->Reserved = 0;
+	pServiceInfo->PMT_PID = Info.MPTPacketID;
+	pServiceInfo->PCR_PID = 0xFFFF;
+	StringCopy(pServiceInfo->szServiceName, Info.ServiceName.c_str());
+	StringCopy(pServiceInfo->szProviderName, Info.ProviderName.c_str());
+}
+
+
+static uint8_t GetAudioComponentTag(const CCoreEngine &CoreEngine, int Index)
+{
+	if (CoreEngine.IsMMTStream()) {
+		const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer = CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+		LibISDB::MMTAnalyzerFilter::AssetInfo Asset;
+		if (pMMTAnalyzer != nullptr
+				&& pMMTAnalyzer->GetAudioAssetInfo(CoreEngine.GetServiceIndex(), Index, &Asset))
+			return CAudioManager::MMTComponentTagToByte(Asset.ComponentTag);
+		return LibISDB::COMPONENT_TAG_INVALID;
+	}
+
+	const LibISDB::AnalyzerFilter *pAnalyzer = CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+	if (pAnalyzer == nullptr)
+		return LibISDB::COMPONENT_TAG_INVALID;
+	return pAnalyzer->GetAudioComponentTag(CoreEngine.GetServiceIndex(), Index);
 }
 
 
@@ -1309,6 +1403,39 @@ LRESULT CPlugin::OnCallback(PluginParam *pParam, MessageCode Message, LPARAM lPa
 				return FALSE;
 
 			const CCoreEngine &CoreEngine = GetAppClass().CoreEngine;
+
+			if (CoreEngine.IsMMTStream()) {
+				const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer = CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+				if (pMMTAnalyzer == nullptr)
+					return FALSE;
+				const WORD ServiceID = CoreEngine.GetSelectableServiceID(Index);
+				if (ServiceID == LibISDB::SERVICE_ID_INVALID)
+					return FALSE;
+				LibISDB::MMTAnalyzerFilter::ServiceInfo Info;
+				if (!pMMTAnalyzer->GetServiceInfoByID(ServiceID, &Info))
+					return FALSE;
+				pServiceInfo->ServiceID = ServiceID;
+				pServiceInfo->VideoPID =
+					Info.VideoAssetList.empty() ? LibISDB::MMT_PACKET_ID_INVALID : Info.VideoAssetList[0].PacketID;
+				const int NumAudioPIDs = std::min(static_cast<int>(Info.AudioAssetList.size()), 4);
+				pServiceInfo->NumAudioPIDs = NumAudioPIDs;
+				for (int i = 0; i < NumAudioPIDs; i++)
+					pServiceInfo->AudioPID[i] = Info.AudioAssetList[i].PacketID;
+				StringCopy(pServiceInfo->szServiceName, Info.ServiceName.c_str());
+				if (pServiceInfo->Size == sizeof(ServiceInfo)) {
+					for (int i = 0; i < NumAudioPIDs; i++) {
+						const LibISDB::MMTAnalyzerFilter::AssetInfo &Asset = Info.AudioAssetList[i];
+						pServiceInfo->AudioComponentType[i] = Asset.HasAudioInfo ? Asset.AudioInfo.ComponentType : 0;
+					}
+					if (!Info.CaptionAssetList.empty())
+						pServiceInfo->SubtitlePID = Info.CaptionAssetList[0].PacketID;
+					else
+						pServiceInfo->SubtitlePID = 0;
+					pServiceInfo->Reserved = 0;
+				}
+				return TRUE;
+			}
+
 			const LibISDB::AnalyzerFilter *pAnalyzer = CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
 			if (pAnalyzer == nullptr)
 				return FALSE;
@@ -3023,9 +3150,6 @@ LRESULT CPlugin::OnCallback(PluginParam *pParam, MessageCode Message, LPARAM lPa
 				return FALSE;
 
 			const CCoreEngine &CoreEngine = GetAppClass().CoreEngine;
-			const LibISDB::AnalyzerFilter *pAnalyzer = CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
-			if (pAnalyzer == nullptr)
-				return FALSE;
 
 			WORD ServiceID = pList->ServiceID;
 			if (ServiceID == 0) {
@@ -3033,6 +3157,24 @@ LRESULT CPlugin::OnCallback(PluginParam *pParam, MessageCode Message, LPARAM lPa
 				if (ServiceID == LibISDB::SERVICE_ID_INVALID)
 					return FALSE;
 			}
+
+			if (CoreEngine.IsMMTStream()) {
+				const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer = CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+				if (pMMTAnalyzer == nullptr)
+					return FALSE;
+				LibISDB::MMTAnalyzerFilter::ServiceInfo Info;
+				if (!pMMTAnalyzer->GetServiceInfoByID(ServiceID, &Info))
+					return FALSE;
+				const LibISDB::MMTAnalyzerFilter::AssetInfoList *pAssetList = GetMMTAssetList(Info, pList->Media);
+				if (pAssetList == nullptr || !CopyESList(*pAssetList, pList))
+					return FALSE;
+				return TRUE;
+			}
+
+			const LibISDB::AnalyzerFilter *pAnalyzer = CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+			if (pAnalyzer == nullptr)
+				return FALSE;
+
 			LibISDB::AnalyzerFilter::ServiceInfo Info;
 			if (!pAnalyzer->GetServiceInfoByID(ServiceID, &Info))
 				return FALSE;
@@ -3072,6 +3214,12 @@ LRESULT CPlugin::OnCallback(PluginParam *pParam, MessageCode Message, LPARAM lPa
 	case MESSAGE_GETSERVICECOUNT:
 		{
 			const CCoreEngine &CoreEngine = GetAppClass().CoreEngine;
+			if (CoreEngine.IsMMTStream()) {
+				const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer = CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+				if (pMMTAnalyzer != nullptr)
+					return pMMTAnalyzer->GetServiceCount();
+				return 0;
+			}
 			const LibISDB::AnalyzerFilter *pAnalyzer = CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
 			if (pAnalyzer != nullptr)
 				return pAnalyzer->GetServiceCount();
@@ -3091,33 +3239,48 @@ LRESULT CPlugin::OnCallback(PluginParam *pParam, MessageCode Message, LPARAM lPa
 				return FALSE;
 
 			const CCoreEngine &CoreEngine = GetAppClass().CoreEngine;
+
+			const auto GetInfo = [&](const auto *pAnalyzer, auto *pInfo) -> bool {
+				if (Service == -1) {
+					const uint16_t ServiceID = CoreEngine.GetServiceID();
+					if (ServiceID == LibISDB::SERVICE_ID_INVALID)
+						return false;
+					return pAnalyzer->GetServiceInfoByID(ServiceID, pInfo);
+				}
+				if ((pServiceInfo->Flags & SERVICE_INFO2_FLAG_BY_ID) != 0) {
+					if ((pServiceInfo->Flags & SERVICE_INFO2_FLAG_BY_SELECTABLE_INDEX) != 0)
+						return false;
+					return pAnalyzer->GetServiceInfoByID(static_cast<uint16_t>(Service), pInfo);
+				}
+				if ((pServiceInfo->Flags & SERVICE_INFO2_FLAG_BY_SELECTABLE_INDEX) != 0) {
+					const uint16_t ServiceID = CoreEngine.GetSelectableServiceID(Service);
+					if (ServiceID == LibISDB::SERVICE_ID_INVALID)
+						return false;
+					return pAnalyzer->GetServiceInfoByID(ServiceID, pInfo);
+				}
+				return pAnalyzer->GetServiceInfo(Service, pInfo);
+			};
+
+			if (CoreEngine.IsMMTStream()) {
+				const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer = CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+				if (pMMTAnalyzer == nullptr)
+					return FALSE;
+				LibISDB::MMTAnalyzerFilter::ServiceInfo Info;
+				if (!GetInfo(pMMTAnalyzer, &Info))
+					return FALSE;
+				AnalyzerServiceInfoToServiceInfo2(Info, pServiceInfo);
+				pServiceInfo->NetworkID = pMMTAnalyzer->GetNetworkID();
+				pServiceInfo->TransportStreamID = pMMTAnalyzer->GetTLVStreamID();
+				return TRUE;
+			}
+
 			const LibISDB::AnalyzerFilter *pAnalyzer = CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
 			if (pAnalyzer == nullptr)
 				return FALSE;
 
 			LibISDB::AnalyzerFilter::ServiceInfo Info;
-
-			if (Service == -1) {
-				const uint16_t ServiceID = CoreEngine.GetServiceID();
-				if (ServiceID == LibISDB::SERVICE_ID_INVALID)
-					return FALSE;
-				if (!pAnalyzer->GetServiceInfoByID(ServiceID, &Info))
-					return FALSE;
-			} else if ((pServiceInfo->Flags & SERVICE_INFO2_FLAG_BY_ID) != 0) {
-				if ((pServiceInfo->Flags & SERVICE_INFO2_FLAG_BY_SELECTABLE_INDEX) != 0)
-					return FALSE;
-				if (!pAnalyzer->GetServiceInfoByID(static_cast<uint16_t>(Service), &Info))
-					return FALSE;
-			} else if ((pServiceInfo->Flags & SERVICE_INFO2_FLAG_BY_SELECTABLE_INDEX) != 0) {
-				const uint16_t ServiceID = CoreEngine.GetSelectableServiceID(Service);
-				if (ServiceID == LibISDB::SERVICE_ID_INVALID)
-					return FALSE;
-				if (!pAnalyzer->GetServiceInfoByID(ServiceID, &Info))
-					return FALSE;
-			} else {
-				if (!pAnalyzer->GetServiceInfo(Service, &Info))
-					return FALSE;
-			}
+			if (!GetInfo(pAnalyzer, &Info))
+				return FALSE;
 
 			AnalyzerServiceInfoToServiceInfo2(Info, pServiceInfo);
 			// 厳密にいえば GetServiceInfo() と同期が必要
@@ -3142,73 +3305,90 @@ LRESULT CPlugin::OnCallback(PluginParam *pParam, MessageCode Message, LPARAM lPa
 			pList->ServiceList = nullptr;
 
 			const CCoreEngine &CoreEngine = GetAppClass().CoreEngine;
+
+			const auto CopyList = [&](const auto *pAnalyzer, uint16_t NetworkID, uint16_t TransportStreamID) -> bool {
+				using AnalyzerType = std::remove_cvref_t<decltype(*pAnalyzer)>;
+
+				if ((pList->Flags & SERVICE_INFO_LIST_FLAG_SDT_ACTUAL) != 0) {
+					// 同時に指定できないフラグ
+					if ((pList->Flags & SERVICE_INFO_LIST_FLAG_SELECTABLE_ONLY) != 0)
+						return false;
+
+					typename AnalyzerType::SDTServiceList SDTList;
+					if (!pAnalyzer->GetSDTServiceList(&SDTList) || SDTList.empty())
+						return false;
+					pList->ServiceList = static_cast<ServiceInfo2*>(std::malloc(sizeof(ServiceInfo2) * SDTList.size()));
+					if (pList->ServiceList == nullptr)
+						return false;
+					pList->ServiceCount = static_cast<DWORD>(SDTList.size());
+
+					for (size_t i = 0; i < SDTList.size(); i++) {
+						ServiceInfo2 &Info = pList->ServiceList[i];
+						const auto &SDTInfo = SDTList[i];
+
+						Info.Size = sizeof(ServiceInfo2);
+						Info.Flags = SERVICE_INFO2_FLAG_NONE;
+						Info.Status = SERVICE_INFO2_STATUS_NONE;
+						if (SDTInfo.FreeCAMode)
+							Info.Status |= SERVICE_INFO2_STATUS_FREE_CA_MODE;
+						Info.NetworkID = NetworkID;
+						Info.TransportStreamID = TransportStreamID;
+						Info.ServiceID = SDTInfo.ServiceID;
+						Info.ServiceType = SDTInfo.ServiceType;
+						Info.Reserved = 0;
+						Info.PMT_PID = 0xFFFF;
+						Info.PCR_PID = 0xFFFF;
+						StringCopy(Info.szServiceName, SDTInfo.ServiceName.c_str());
+						StringCopy(Info.szProviderName, SDTInfo.ProviderName.c_str());
+					}
+				} else {
+					typename AnalyzerType::ServiceList List;
+
+					if ((pList->Flags & SERVICE_INFO_LIST_FLAG_SELECTABLE_ONLY) != 0) {
+						bool Result;
+						if constexpr (std::is_same_v<AnalyzerType, LibISDB::MMTAnalyzerFilter>)
+							Result = CoreEngine.GetSelectableMMTServiceList(&List);
+						else
+							Result = CoreEngine.GetSelectableServiceList(&List);
+						if (!Result || List.empty())
+							return false;
+					} else {
+						if (!pAnalyzer->GetServiceList(&List) || List.empty())
+							return false;
+					}
+
+					pList->ServiceList = static_cast<ServiceInfo2*>(std::malloc(sizeof(ServiceInfo2) * List.size()));
+					if (pList->ServiceList == nullptr)
+						return false;
+					pList->ServiceCount = static_cast<DWORD>(List.size());
+
+					for (size_t i = 0; i < List.size(); i++) {
+						ServiceInfo2 &Info = pList->ServiceList[i];
+						Info.Size = sizeof(ServiceInfo2);
+						Info.Flags = SERVICE_INFO2_FLAG_NONE;
+						AnalyzerServiceInfoToServiceInfo2(List[i], &Info);
+						Info.NetworkID = NetworkID;
+						Info.TransportStreamID = TransportStreamID;
+					}
+				}
+
+				return true;
+			};
+
+			if (CoreEngine.IsMMTStream()) {
+				const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer = CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+				if (pMMTAnalyzer == nullptr)
+					return FALSE;
+				return CopyList(pMMTAnalyzer, pMMTAnalyzer->GetNetworkID(), pMMTAnalyzer->GetTLVStreamID());
+			}
+
 			const LibISDB::AnalyzerFilter *pAnalyzer = CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
 			if (pAnalyzer == nullptr)
 				return FALSE;
 
 			// 厳密にいえば GetServiceList() 等と同期が必要
-			const uint16_t NetworkID = pAnalyzer->GetNetworkID();
-			const uint16_t TransportStreamID = pAnalyzer->GetTransportStreamID();
-
-			if ((pList->Flags & SERVICE_INFO_LIST_FLAG_SDT_ACTUAL) != 0) {
-				// 同時に指定できないフラグ
-				if ((pList->Flags & SERVICE_INFO_LIST_FLAG_SELECTABLE_ONLY) != 0)
-					return FALSE;
-
-				LibISDB::AnalyzerFilter::SDTServiceList SDTList;
-				if (!pAnalyzer->GetSDTServiceList(&SDTList) || SDTList.empty())
-					return FALSE;
-				pList->ServiceList = static_cast<ServiceInfo2*>(std::malloc(sizeof(ServiceInfo2) * SDTList.size()));
-				if (pList->ServiceList == nullptr)
-					return FALSE;
-				pList->ServiceCount = static_cast<DWORD>(SDTList.size());
-
-				for (size_t i = 0; i < SDTList.size(); i++) {
-					ServiceInfo2 &Info = pList->ServiceList[i];
-					const LibISDB::AnalyzerFilter::SDTServiceInfo &SDTInfo = SDTList[i];
-
-					Info.Size = sizeof(ServiceInfo2);
-					Info.Flags = SERVICE_INFO2_FLAG_NONE;
-					Info.Status = SERVICE_INFO2_STATUS_NONE;
-					if (SDTInfo.FreeCAMode)
-						Info.Status |= SERVICE_INFO2_STATUS_FREE_CA_MODE;
-					Info.NetworkID = NetworkID;
-					Info.TransportStreamID = TransportStreamID;
-					Info.ServiceID = SDTInfo.ServiceID;
-					Info.ServiceType = SDTInfo.ServiceType;
-					Info.Reserved = 0;
-					Info.PMT_PID = 0xFFFF;
-					Info.PCR_PID = 0xFFFF;
-					StringCopy(Info.szServiceName, SDTInfo.ServiceName.c_str());
-					StringCopy(Info.szProviderName, SDTInfo.ProviderName.c_str());
-				}
-			} else {
-				LibISDB::AnalyzerFilter::ServiceList List;
-
-				if ((pList->Flags & SERVICE_INFO_LIST_FLAG_SELECTABLE_ONLY) != 0) {
-					if (!CoreEngine.GetSelectableServiceList(&List) || List.empty())
-						return FALSE;
-				} else {
-					if (!pAnalyzer->GetServiceList(&List) || List.empty())
-						return FALSE;
-				}
-
-				pList->ServiceList = static_cast<ServiceInfo2*>(std::malloc(sizeof(ServiceInfo2) * List.size()));
-				if (pList->ServiceList == nullptr)
-					return FALSE;
-				pList->ServiceCount = static_cast<DWORD>(List.size());
-
-				for (size_t i = 0; i < List.size(); i++) {
-					ServiceInfo2 &Info = pList->ServiceList[i];
-					Info.Size = sizeof(ServiceInfo2);
-					Info.Flags = SERVICE_INFO2_FLAG_NONE;
-					AnalyzerServiceInfoToServiceInfo2(List[i], &Info);
-					Info.NetworkID = NetworkID;
-					Info.TransportStreamID = TransportStreamID;
-				}
-			}
+			return CopyList(pAnalyzer, pAnalyzer->GetNetworkID(), pAnalyzer->GetTransportStreamID());
 		}
-		return TRUE;
 
 	case MESSAGE_GETAUDIOINFO:
 		{
@@ -3257,15 +3437,30 @@ LRESULT CPlugin::OnCallback(PluginParam *pParam, MessageCode Message, LPARAM lPa
 			WORD ServiceID = static_cast<WORD>(lParam2);
 
 			const CCoreEngine &CoreEngine = GetAppClass().CoreEngine;
-			const LibISDB::AnalyzerFilter *pAnalyzer = CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
-			if (pAnalyzer == nullptr)
-				return 0;
 
 			if (ServiceID == 0) {
 				ServiceID = CoreEngine.GetServiceID();
 				if (ServiceID == LibISDB::SERVICE_ID_INVALID)
 					return 0;
 			}
+
+			if (CoreEngine.IsMMTStream()) {
+				const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer = CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+				if (pMMTAnalyzer == nullptr)
+					return 0;
+				LibISDB::MMTAnalyzerFilter::ServiceInfo Info;
+				if (!pMMTAnalyzer->GetServiceInfoByID(ServiceID, &Info))
+					return 0;
+				const LibISDB::MMTAnalyzerFilter::AssetInfoList *pAssetList = GetMMTAssetList(Info, Media);
+				if (pAssetList == nullptr)
+					return 0;
+				return static_cast<LRESULT>(pAssetList->size());
+			}
+
+			const LibISDB::AnalyzerFilter *pAnalyzer = CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+			if (pAnalyzer == nullptr)
+				return 0;
+
 			const int ServiceIndex = pAnalyzer->GetServiceIndexByID(ServiceID);
 			if (ServiceIndex < 0)
 				return 0;
@@ -3345,18 +3540,21 @@ LRESULT CPlugin::OnPluginMessage(WPARAM wParam, LPARAM lParam)
 			if (pChInfo == nullptr)
 				return FALSE;
 			ConvertChannelInfo(pChInfo, pChannelInfo);
-			const LibISDB::AnalyzerFilter *pAnalyzer =
-				GetAppClass().CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+			const CCoreEngine &CoreEngine = GetAppClass().CoreEngine;
 			LibISDB::String Name;
-			if (pAnalyzer->GetNetworkName(&Name)) {
-				StringCopy(pChannelInfo->szNetworkName, Name.c_str());
+			if (CoreEngine.IsMMTStream()) {
+				// TLV-NIT には TS 名が無い
+				const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer = CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+				if (pMMTAnalyzer != nullptr && pMMTAnalyzer->GetNetworkName(&Name))
+					StringCopy(pChannelInfo->szNetworkName, Name.c_str());
 			} else {
-				pChannelInfo->szNetworkName[0] = '\0';
-			}
-			if (!pAnalyzer->GetTSName(&Name)) {
-				StringCopy(pChannelInfo->szTransportStreamName, Name.c_str());
-			} else {
-				pChannelInfo->szTransportStreamName[0] = '\0';
+				const LibISDB::AnalyzerFilter *pAnalyzer = CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+				if (pAnalyzer != nullptr) {
+					if (pAnalyzer->GetNetworkName(&Name))
+						StringCopy(pChannelInfo->szNetworkName, Name.c_str());
+					if (pAnalyzer->GetTSName(&Name))
+						StringCopy(pChannelInfo->szTransportStreamName, Name.c_str());
+				}
 			}
 		}
 		return TRUE;
@@ -4111,8 +4309,7 @@ LRESULT CPlugin::OnPluginMessage(WPARAM wParam, LPARAM lParam)
 			if ((pInfo->Flags & AUDIO_SELECT_FLAG_COMPONENT_TAG) != 0) {
 				SelectInfo.ID = CAudioManager::MakeID(0, pInfo->ComponentTag);
 			} else {
-				const LibISDB::AnalyzerFilter *pAnalyzer = App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
-				const uint8_t ComponentTag = pAnalyzer->GetAudioComponentTag(App.CoreEngine.GetServiceIndex(), pInfo->Index);
+				const uint8_t ComponentTag = GetAudioComponentTag(App.CoreEngine, pInfo->Index);
 				if (ComponentTag == LibISDB::COMPONENT_TAG_INVALID)
 					return FALSE;
 				SelectInfo.ID = CAudioManager::MakeID(0, ComponentTag);
@@ -4156,10 +4353,9 @@ LRESULT CPlugin::OnPluginMessage(WPARAM wParam, LPARAM lParam)
 				return FALSE;
 
 			const CAppMain &App = GetAppClass();
-			const LibISDB::AnalyzerFilter *pAnalyzer = App.CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
 
 			pInfo->Index = App.UICore.GetAudioStream();
-			pInfo->ComponentTag = pAnalyzer->GetAudioComponentTag(App.CoreEngine.GetServiceIndex(), pInfo->Index);
+			pInfo->ComponentTag = GetAudioComponentTag(App.CoreEngine, pInfo->Index);
 			std::memset(pInfo->Reserved, 0, sizeof(pInfo->Reserved));
 			pInfo->DualMono = static_cast<DualMonoChannel>(App.UICore.GetDualMonoMode());
 		}
@@ -4333,8 +4529,14 @@ void CPlugin::CStreamGrabber::SetClientData(void *pClientData)
 
 bool CPlugin::CStreamGrabber::ReceiveData(LibISDB::DataBuffer *pData)
 {
-	if (pData->GetSize() != LibISDB::TS_PACKET_SIZE)
+	if (pData->Is<LibISDB::TLVPacket>()) {
+		// TS だけを扱うプラグインは 188 バイトとして読み書きする
+		if (pData->GetBufferSize() < LibISDB::TS_PACKET_SIZE
+				&& pData->AllocateBuffer(LibISDB::TS_PACKET_SIZE) < LibISDB::TS_PACKET_SIZE)
+			return true;
+	} else if (!pData->Is<LibISDB::TSPacket>()) {
 		return true;
+	}
 	return m_Callback(pData->GetData(), m_pClientData) != FALSE;
 }
 

@@ -225,9 +225,10 @@ namespace TVTest
 		bool QueryStart(int Offset = 0) const;
 		bool QueryStop(int Offset = 0) const;
 		bool RecordDialog(HWND hwndOwner);
+		// fMMTSExtension : 拡張子 .ts を .mmts にする (TLV (MMT) の録画)
 		bool GenerateFilePath(
 			const FileNameFormatInfo &FormatInfo, LPCWSTR pszFormat,
-			String *pFilePath) const;
+			String *pFilePath, bool fMMTSExtension = false) const;
 
 		CRecordingSettings &GetRecordingSettings() { return m_Settings; }
 		const CRecordingSettings &GetRecordingSettings() const { return m_Settings; }

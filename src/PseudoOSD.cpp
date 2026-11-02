@@ -604,7 +604,7 @@ void CPseudoOSD::UpdateLayeredWindow()
 					Canvas.DrawImage(
 						0, (Height - m_IconHeight) / 2,
 						IconWidth, m_IconHeight,
-						&Image, 0, 0, m_IconWidth, m_IconHeight);
+						&Image, 0, 0, Image.GetWidth(), Image.GetHeight());
 					RECT rcIcon;
 					rcIcon.left = 0;
 					rcIcon.top = (Height - m_IconHeight) / 2;
@@ -663,9 +663,8 @@ void CPseudoOSD::UpdateLayeredWindow()
 			} else if (m_hbm != nullptr) {
 				Graphics::CImage Image;
 				if (Image.CreateFromBitmap(m_hbm)) {
-					Canvas.DrawImage(&Image, 0, 0);
-					const RECT rcImage = {0, 0, Image.GetWidth(), Image.GetHeight()};
-					DrawImageEffect(Canvas, &rcImage);
+					Canvas.DrawImage(0, 0, Width, Height, &Image, 0, 0, Image.GetWidth(), Image.GetHeight());
+					DrawImageEffect(Canvas, &rc);
 				}
 			}
 		}

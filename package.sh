@@ -126,15 +126,20 @@ do
     cp -fp "${plugin_src_dir}/${plugin_file}" "${dst_dir}/Plugins/${plugin_file}"
 done
 
-version=
-if [[ $(grep -aE ^#define[[:space:]]+VERSION_TEXT_A src/TVTestVersion.h) =~ \"(.+)\"$ ]]
-then
-    version=${BASH_REMATCH[1]}_
-fi
+## Archive name: TVTest-<VERSION_TEXT_A>-<VERSION_FORK_A>-<VERSION_STATUS_A>-<git hash>-<arch>
+version_define()
+{
+    if [[ $(grep -aE "^#define[[:space:]]+$1[[:space:]]" src/TVTestVersion.h) =~ \"(.+)\"$ ]]
+    then
+        echo "-${BASH_REMATCH[1]}"
+    fi
+}
+
+version=$(version_define VERSION_TEXT_A)$(version_define VERSION_FORK_A)$(version_define VERSION_STATUS_A)
 
 git_hash=$(git rev-parse --short HEAD)
 
-archive_name=${out_dir}/TVTest_${version}${git_hash}_${arch}
+archive_name=${out_dir}/TVTest${version}-${git_hash}-${arch}
 
 if [ "$archive" = 7z ]
 then

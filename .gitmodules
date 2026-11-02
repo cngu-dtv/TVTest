@@ -1,3 +1,4 @@
 [submodule "src/LibISDB"]
 	path = src/LibISDB
-	url = https://github.com/DBCTRADO/LibISDB.git
+	url = https://github.com/cngu-dtv/LibISDB.git
+	branch = develop

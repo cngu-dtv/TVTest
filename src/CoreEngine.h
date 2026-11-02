@@ -23,7 +23,8 @@
 
 
 #include "LibISDB/LibISDB/Windows/Viewer/ViewerEngine.hpp"
-#include "LibISDB/LibISDB/Filters/TSPacketParserFilter.hpp"
+#include "LibISDB/LibISDB/Filters/StreamPacketParserFilter.hpp"
+#include "LibISDB/LibISDB/Filters/MMTAnalyzerFilter.hpp"
 #include "LibISDB/LibISDB/Filters/TeeFilter.hpp"
 #include "LibISDB/LibISDB/Filters/EPGDatabaseFilter.hpp"
 #include "LibISDB/LibISDB/Filters/LogoDownloaderFilter.hpp"
@@ -90,9 +91,20 @@ namespace TVTest
 			virtual void OnFilterGraphFinalize(LibISDB::ViewerFilter *pViewer, IGraphBuilder *pGraphBuilder) {}
 			virtual void OnFilterGraphFinalized(LibISDB::ViewerFilter *pViewer, IGraphBuilder *pGraphBuilder) {}
 			virtual void OnSPDIFPassthroughError(LibISDB::ViewerFilter *pViewer, HRESULT hr) {}
+
+			// MMT
+			virtual void OnPLTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer, bool StreamChanged) {}
+			virtual void OnMPTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer, uint16_t ServiceID) {}
+			virtual void OnMHSDTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer) {}
+			virtual void OnEventChanged(LibISDB::MMTAnalyzerFilter *pAnalyzer, uint16_t EventID) {}
+			virtual void OnMHEITUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer) {}
+			virtual void OnMHTOTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer) {}
 		};
 
 		~CCoreEngine();
+
+		// 入力中のストリームが TLV (MMT) か
+		using LibISDB::TSEngine::IsMMTStream;
 
 		void Close();
 		void CreateFilters();
@@ -283,6 +295,13 @@ namespace TVTest
 		void OnEITUpdated(LibISDB::AnalyzerFilter *pAnalyzer) override;
 		void OnSDTUpdated(LibISDB::AnalyzerFilter *pAnalyzer) override;
 		void OnTOTUpdated(LibISDB::AnalyzerFilter *pAnalyzer) override;
+
+	// MMTAnalyzerFilter::EventListener
+		void OnPLTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer) override;
+		void OnMPTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer, uint16_t ServiceID) override;
+		void OnMHSDTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer) override;
+		void OnMHEITUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer) override;
+		void OnMHTOTUpdated(LibISDB::MMTAnalyzerFilter *pAnalyzer) override;
 
 	// ViewerFilter::EventListener
 		void OnVideoSizeChanged(LibISDB::ViewerFilter *pViewer, const LibISDB::DirectShow::VideoParser::VideoInfo &Info) override;

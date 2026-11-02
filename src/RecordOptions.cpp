@@ -133,6 +133,7 @@ bool CRecordOptions::ReadSettings(CSettings &Settings)
 	if (Settings.Read(TEXT("RecMaxPendingSize"), &Value))
 		m_Settings.m_MaxPendingSize = std::clamp(Value, MAX_PENDING_SIZE_MIN, MAX_PENDING_SIZE_MAX);
 	Settings.Read(TEXT("ShowRecordRemainTime"), &m_fShowRemainTime);
+	Settings.Read(TEXT("RecordMMTSExtension"), &m_fMMTSExtension);
 
 	String CommandText;
 	if (Settings.Read(TEXT("StatusBarRecordCommand"), &CommandText)) {
@@ -168,6 +169,7 @@ bool CRecordOptions::WriteSettings(CSettings &Settings)
 	Settings.Write(TEXT("TimeShiftRecording"), m_Settings.m_fEnableTimeShift);
 	Settings.Write(TEXT("RecMaxPendingSize"), static_cast<unsigned int>(m_Settings.m_MaxPendingSize));
 	Settings.Write(TEXT("ShowRecordRemainTime"), m_fShowRemainTime);
+	Settings.Write(TEXT("RecordMMTSExtension"), m_fMMTSExtension);
 	if (m_StatusBarRecordCommand != 0) {
 		Settings.Write(TEXT("StatusBarRecordCommand"), GetAppClass().CommandManager.GetCommandIDText(m_StatusBarRecordCommand));
 	} else {
@@ -414,6 +416,8 @@ INT_PTR CRecordOptions::DlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lPar
 				hDlg, IDC_RECORDOPTIONS_MAXPENDINGSIZE_SPIN,
 				MAX_PENDING_SIZE_MIN / MEGA_BYTES, MAX_PENDING_SIZE_MAX / MEGA_BYTES);
 
+			DlgCheckBox_Check(hDlg, IDC_RECORDOPTIONS_MMTSEXTENSION, m_fMMTSExtension);
+
 			AddControls({
 				{IDC_RECORDOPTIONS_SAVEFOLDER,        AlignFlag::Horz},
 				{IDC_RECORDOPTIONS_SAVEFOLDER_BROWSE, AlignFlag::Right},
@@ -573,6 +577,9 @@ INT_PTR CRecordOptions::DlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lPar
 				BufferSize = ::GetDlgItemInt(hDlg, IDC_RECORDOPTIONS_MAXPENDINGSIZE, nullptr, FALSE);
 				if (BufferSize != 0)
 					m_Settings.m_MaxPendingSize = std::clamp(BufferSize * MEGA_BYTES, MAX_PENDING_SIZE_MIN, MAX_PENDING_SIZE_MAX);
+
+				m_fMMTSExtension =
+					DlgCheckBox_IsChecked(hDlg, IDC_RECORDOPTIONS_MMTSEXTENSION);
 
 				SetUpdateFlag(UPDATE_RECORDINGSETTINGS);
 

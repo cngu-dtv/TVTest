@@ -1497,10 +1497,14 @@ bool CInformationPanel::CServiceItem::Update()
 {
 	const CCoreEngine &CoreEngine = GetAppClass().CoreEngine;
 	const LibISDB::AnalyzerFilter *pAnalyzer = CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
+	const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer =
+		CoreEngine.IsMMTStream() ? CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>() : nullptr;
 	String ServiceName;
 
-	if (pAnalyzer != nullptr
-			&& pAnalyzer->GetServiceName(CoreEngine.GetServiceIndex(), &ServiceName)) {
+	if (pMMTAnalyzer != nullptr ?
+			pMMTAnalyzer->GetServiceName(CoreEngine.GetServiceIndex(), &ServiceName) :
+			pAnalyzer != nullptr
+				&& pAnalyzer->GetServiceName(CoreEngine.GetServiceIndex(), &ServiceName)) {
 		if (m_ServiceName == ServiceName)
 			return false;
 		m_ServiceName = ServiceName;
@@ -1573,7 +1577,15 @@ bool CInformationPanel::CProgramInfoItem::Update()
 
 	const LibISDB::AnalyzerFilter *pAnalyzer = CoreEngine.GetFilter<LibISDB::AnalyzerFilter>();
 	LibISDB::AnalyzerFilter::EventSeriesInfo SeriesInfo;
-	if (pAnalyzer->GetEventSeriesInfo(CoreEngine.GetServiceIndex(), &SeriesInfo, m_fNext)
+	bool fSeriesInfo;
+	if (CoreEngine.IsMMTStream()) {
+		// MH-シリーズ記述子
+		const LibISDB::MMTAnalyzerFilter *pMMTAnalyzer = CoreEngine.GetFilter<LibISDB::MMTAnalyzerFilter>();
+		fSeriesInfo = pMMTAnalyzer->GetEventSeriesInfo(CoreEngine.GetServiceIndex(), &SeriesInfo, m_fNext);
+	} else {
+		fSeriesInfo = pAnalyzer->GetEventSeriesInfo(CoreEngine.GetServiceIndex(), &SeriesInfo, m_fNext);
+	}
+	if (fSeriesInfo
 			&& SeriesInfo.EpisodeNumber != 0 && SeriesInfo.LastEpisodeNumber != 0) {
 		Formatter.Append(TEXT("\r\n\r\n(シリーズ"));
 		if (SeriesInfo.RepeatLabel != 0)

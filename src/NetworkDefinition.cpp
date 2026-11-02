@@ -45,6 +45,9 @@ const CNetworkDefinition::RemoteControlKeyIDAssignInfo CNetworkDefinition::m_Def
 	{ 4,   101,   103,   100,  0}, // BS 1-3ch
 	{ 4,   141,   229,   100, 10}, // BS 4-12ch
 	{10, 32769, 33767, 32768,  0},
+	// 高度BS は TLV-NIT のリモコンキー記述子を優先し、これは取得できない場合に使う (実放送の割り当てが BS と同じ)
+	{11,   101,   103,   100,  0},
+	{11,   141,   229,   100, 10},
 };
 
 
@@ -54,6 +57,9 @@ CNetworkDefinition::CNetworkDefinition()
 	m_NetworkInfoList.emplace_back(6, TEXT("CS.SP-Basic"), NetworkType::CS);
 	m_NetworkInfoList.emplace_back(7, TEXT("CS.SP-Basic"), NetworkType::CS);
 	m_NetworkInfoList.emplace_back(10, TEXT("CS.SP-Premium"), NetworkType::CS);
+	// 高度BSデジタル放送 / 高度広帯域CSデジタル放送 (ARIB TR-B39)
+	m_NetworkInfoList.emplace_back(11, TEXT("BS.Advanced"), NetworkType::BS);
+	m_NetworkInfoList.emplace_back(12, TEXT("CS.Advanced"), NetworkType::CS);
 
 	m_KeyIDAssignList.reserve(lengthof(m_DefaultKeyIDAssignList));
 	for (const auto &e : m_DefaultKeyIDAssignList)

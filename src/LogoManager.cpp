@@ -35,7 +35,8 @@ namespace
 {
 
 
-constexpr std::size_t MAX_LOGO_BYTES = 1296;
+// 高度BS の Large ロゴは 1 枚 16kB 程度まである (ARIB TR-B39 第1部 第1編 表 6-1)
+constexpr std::size_t MAX_LOGO_BYTES = 16 * 1024;
 
 const char PNG_SIGNATURE[] = "\x89PNG\r\n\x1A\n";
 constexpr std::size_t PNG_SIGNATURE_BYTES = 8;
@@ -249,13 +250,13 @@ bool CLogoManager::LoadLogoFile(LPCTSTR pszFileName)
 
 	const DWORD ImageHeaderSize =
 		FileHeader.Version == 0 ? sizeof(LogoImageHeader) : sizeof(LogoImageHeader2);
-	BYTE Buffer[MAX_LOGO_BYTES];
+	std::unique_ptr<BYTE[]> Buffer(new BYTE[MAX_LOGO_BYTES]);
 
 	for (DWORD i = 0; i < FileHeader.NumImages; i++) {
 		LogoImageHeader2 ImageHeader;
 
 		if (File.Read(&ImageHeader, ImageHeaderSize) != ImageHeaderSize
-				|| ImageHeader.LogoType > 0x05
+				|| ImageHeader.LogoType > LOGOTYPE_LAST
 				|| ImageHeader.DataSize <= PNG_SIGNATURE_BYTES
 				|| ImageHeader.DataSize > MAX_LOGO_BYTES) {
 			TRACE(TEXT("CLogoManager::LoadLogoFile() : Image header error\n"));
@@ -263,11 +264,11 @@ bool CLogoManager::LoadLogoFile(LPCTSTR pszFileName)
 		}
 
 		DWORD CRC;
-		if (File.Read(Buffer, ImageHeader.DataSize) != ImageHeader.DataSize
-				|| std::memcmp(Buffer, PNG_SIGNATURE, PNG_SIGNATURE_BYTES) != 0
+		if (File.Read(Buffer.get(), ImageHeader.DataSize) != ImageHeader.DataSize
+				|| std::memcmp(Buffer.get(), PNG_SIGNATURE, PNG_SIGNATURE_BYTES) != 0
 				|| File.Read(&CRC, sizeof(CRC)) != sizeof(CRC)
 				|| CRC != LibISDB::CRC32MPEG2::Calc(
-						Buffer, ImageHeader.DataSize,
+						Buffer.get(), ImageHeader.DataSize,
 						LibISDB::CRC32MPEG2::Calc(reinterpret_cast<const uint8_t*>(&ImageHeader), ImageHeaderSize))) {
 			return false;
 		}
@@ -278,7 +279,7 @@ bool CLogoManager::LoadLogoFile(LPCTSTR pszFileName)
 		Data.LogoVersion = ImageHeader.LogoVersion;
 		Data.LogoType = ImageHeader.LogoType;
 		Data.DataSize = ImageHeader.DataSize;
-		Data.pData = Buffer;
+		Data.pData = Buffer.get();
 		if (FileHeader.Version != 0 && ImageHeader.Time != 0) {
 			// 以前のバージョンには時刻情報が壊れる不具合があったため、
 			// 値が正常な範囲かチェックする
@@ -473,7 +474,7 @@ DWORD CLogoManager::GetAvailableLogoType(WORD NetworkID, WORD ServiceID) const
 		return 0;
 	const WORD LogoID = itrID->second;
 	DWORD Flags = 0;
-	for (BYTE i = 0; i <= 5; i++) {
+	for (BYTE i = LOGOTYPE_FIRST; i <= LOGOTYPE_LAST; i++) {
 		LogoMap::const_iterator itrLogo = m_LogoMap.find(GetMapKey(NetworkID, LogoID, i));
 		if (itrLogo != m_LogoMap.end())
 			Flags |= 1 << i;
@@ -626,10 +627,12 @@ CLogoManager::CLogoData *CLogoManager::FindLogoData(WORD NetworkID, WORD LogoID,
 	LogoMap::iterator itr;
 
 	if (LogoType == LOGOTYPE_SMALL || LogoType == LOGOTYPE_BIG) {
-		static const BYTE SmallLogoPriority[] = {2, 0, 1, 5, 3, 4};
-		static const BYTE BigLogoPriority[] = {5, 3, 4, 2, 0, 1};
+		static const BYTE SmallLogoPriority[] = {2, 0, 1, 5, 3, 4, 6, 7};
+		static const BYTE BigLogoPriority[] = {7, 6, 5, 3, 4, 2, 0, 1};
+		static_assert(std::size(SmallLogoPriority) == LOGOTYPE_LAST + 1);
+		static_assert(std::size(BigLogoPriority) == LOGOTYPE_LAST + 1);
 		const BYTE *pPriority = LogoType == LOGOTYPE_SMALL ? SmallLogoPriority : BigLogoPriority;
-		for (BYTE i = 0; i <= 5; i++) {
+		for (BYTE i = 0; i <= LOGOTYPE_LAST; i++) {
 			Key = GetMapKey(NetworkID, LogoID, pPriority[i]);
 			itr = m_LogoMap.find(Key);
 			if (itr != m_LogoMap.end())
@@ -696,7 +699,7 @@ CLogoManager::CLogoData *CLogoManager::LoadLogoData(WORD NetworkID, WORD LogoID,
 		return nullptr;
 	LARGE_INTEGER FileSize;
 	if (!::GetFileSizeEx(hFile, &FileSize)
-			|| FileSize.QuadPart < 64 || FileSize.QuadPart > 1024) {
+			|| FileSize.QuadPart < 64 || FileSize.QuadPart > static_cast<LONGLONG>(MAX_LOGO_BYTES)) {
 		::CloseHandle(hFile);
 		return nullptr;
 	}
