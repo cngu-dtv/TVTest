@@ -19,8 +19,10 @@ jobs:
         include:
           - arch: x86
             platform: Win32
+            libisdb_platform: x86
           - arch: x64
             platform: x64
+            libisdb_platform: x64
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,7 +32,7 @@ jobs:
       - uses: microsoft/setup-msbuild@v2
 
       - name: Build LibISDB
-        run: msbuild src/LibISDB/Projects/LibISDB.sln -p:Configuration=Release -p:Platform=${{ matrix.platform }} -m -v:m
+        run: msbuild src/LibISDB/Projects/LibISDB.sln -p:Configuration=Release -p:Platform=${{ matrix.libisdb_platform }} -m -v:m
 
       - name: Build TVTest
         run: msbuild src/TVTest.sln -t:TVTest -p:Configuration=Release -p:Platform=${{ matrix.platform }} -m -v:m
